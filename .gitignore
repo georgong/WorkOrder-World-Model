@@ -1,0 +1,59 @@
+########################
+# Data: keep structure only
+########################
+data/*
+
+########################
+# Editor / IDE
+########################
+.vscode/
+.idea/
+*.swp
+*.swo
+
+########################
+# Python
+########################
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+########################
+# Virtual env
+########################
+.venv/
+venv/
+env/
+
+########################
+# OS junk
+########################
+.DS_Store
+Thumbs.db
+
+########################
+# Logs / outputs
+########################
+logs/
+*.log
+outputs/
+results/
+checkpoints/
+
+########################
+# Secrets
+########################
+.env
+.env.*
+*.key
+*.pem
+
+########################
+# Weights
+########################
+.pt
