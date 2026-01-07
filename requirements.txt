@@ -11,3 +11,4 @@ torch>=2.1,<2.4
 # PyTorch Geometric (installed after torch)
 torch-geometric>=2.4,<2.6
 
+pyyaml
