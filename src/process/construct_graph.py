@@ -11,6 +11,7 @@ import pandas as pd
 from src.process.utils.filter_raw_data import drop_sparse_columns
 from src.process.utils.convert_columns import convert_with_schema
 from src.process.utils.convert_columns import remove_outliers_by_spec
+
 paths = [
     "data/raw_data/W6TASKS-14.csv",
     "data/raw_data/W6TASK_STATUSES-0.csv",
@@ -108,7 +109,7 @@ dtype_tasks = {
     #"LATESTART": "datetime64[ns]", #we shouldn't use for prediction
     "OPENDATE": "datetime64[ns]",
 
-    # 优先级 / 状态 / 地理信息
+    # priority, status, region, district, postcode
     "PRIORITY": "Int64",
     "STATUS": "Int64",          
     "REGION": "Int64",
@@ -147,7 +148,7 @@ dtype_tasks = {
     "SEMPRAWORKMGMTMODDATE": "datetime64[ns]",
 
 
-    "SEMPRAINTERRUPTFLAG": "string",     # 在你原规则里被归类为 string id
+    "SEMPRAINTERRUPTFLAG": "string",     #  string id
     "SEMPRAORDERDESCRIPTION": "string",
     "SEMPRALOCATIONMAP1": "string",
     "SEMPRALOCATIONMAP2": "string",
@@ -159,11 +160,11 @@ dtype_tasks = {
     "SEMPRAREFERFLAG": "Int64",
     "SEMPRACPFACILITYTYPE": "string",
     "SEMPRACOSTCENTER": "string",
-    "SEMPRASCHEDULINGHORIZON": "Float64",  # horizon 长度，留成浮点更保险
+    "SEMPRASCHEDULINGHORIZON": "Float64",  # horizon
 
 
     "OPTIMIZEONDATE": "datetime64[ns]",
-    "INTSTATUSNAME": "string",           # COMPLETED / Map 等
+    "INTSTATUSNAME": "string",           # COMPLETED / Map 
 
 
     "CMMATERIALSFLAG": "Int64",
@@ -178,7 +179,7 @@ dtype_tasks = {
     "CMCORROSION": "Int64",
     "OCRTREE": "Int64",
     "OCRUSAMARKOUT": "Int64",
-    "CMREASONCODE": "Float64",          # 留成 Float64，
+    "CMREASONCODE": "Float64",          # Float64
     "CUSTOMERSAFFECTED": "Float64",
     "ZZNOTUSERCMSUPPORT": "Int64",
     "OCRENVIRONMENTAL": "Int64",
@@ -190,13 +191,11 @@ dtype_tasks = {
     #"ONSITETIMESTAMP": "datetime64[ns]", # we shouldn't use for prediction
     #"COMPLETIONTIMESTAMP": "datetime64[ns]", # we shouldn't use for prediction
 
-    # 位置 / 项目相关
     "FUNCTLOCREFNBR": "string",
     "OCRFLAGGING4MAN": "Int64",
     "OCRMACHINEDIGGER": "Int64",
     "CLICKPROJECTCODE": "string",
 
-    # metric / 统计字段
     "METRICDATE": "datetime64[ns]",
     "MAPORDER": "Int64",
     "DAYSFROMDUEDATE": "Float64",
@@ -205,28 +204,23 @@ dtype_tasks = {
 
     "FL_FUNCTLOCDISP": "string",
 
-    # 派工 / 上传 flag
     "SEMPRADISPATCHREADY": "Int64",
     "AMOPTOUT": "Int64",
     "UPLOADPENDINGFLAG": "Int64",
 
-    # 冗余 key & 归一化日期
     "Z_TASKKEY_CHAR": "string",
     "Z_EARLYSTART_DATE": "datetime64[ns]",
     "Z_DUE_DATE": "datetime64[ns]",
     "Z_SCHEDULEDSTART_DATE": "datetime64[ns]",
     "Z_SCHEDULEDFINISH_DATE": "datetime64[ns]",
     "Z_TIMECREATED_DATE": "datetime64[ns]",
-    #"Z_COMPLETION_DATE": "datetime64[ns]", # we shouldn't use for prediction
-
-    # 这个在样本里有，但你 snippet 里没直接点到的：
-    "SEMPRAEMERGENCY": "Int64",          # 0/1 标志
+    "SEMPRAEMERGENCY": "Int64",        
 }
 
 task_df = convert_with_schema(
     task_df,
     dtype_tasks,
-    year_min=2000,   # 你自己定边界，合理一点就好
+    year_min=2000,  
     year_max=2100,
     inplace=False,
     verbose=True,
@@ -237,3 +231,4 @@ remove_outliers_by_spec(task_df,spec =
     {
       "SCHEDULECOMPLETIONTIME": {"value_bounds": (0, None), "quantile_bounds": (None, None)},
     },combine="and",default_inclusive=True,default_keep_na=True,return_report=False)
+
