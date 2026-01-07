@@ -7,6 +7,7 @@ datasets:
         key: #if this variable is a key, which does not a predictive feature but useful for joins and construct graphs
         mask: #if this variable needs masking during the prediction for some reason: e.g., leakage
         outlier: [None, None] #specify outlier value, eg:[0,100] for numerical variable or [0.0,1.0] for percentage variable, if not just put [None,None]
+        #if the variable is categorical, outlier can be specified as a list of values, eg: ['unknown','n/a',"a","b","c"],then these values will be treated as outliers
 
       REVISION:
         dtype: Int64
