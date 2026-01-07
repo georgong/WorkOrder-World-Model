@@ -1,0 +1,604 @@
+datasets:
+  tasks:
+    file: data/raw/W6TASKS.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key: #if this variable is a key, which does not a predictive feature but useful for joins and construct graphs
+        mask: #if this variable needs masking during the prediction for some reason: e.g., leakage
+        outlier: [None, None] #specify outlier value, eg:[0,100] for numerical variable or [0.0,1.0] for percentage variable, if not just put [None,None]
+        #if the variable is categorical, outlier can be specified as a list of values, eg: ['unknown','n/a',"a","b","c"],then these values will be treated as outliers
+
+      REVISION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CREATEDBY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMECREATED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      MODIFIEDBY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMEMODIFIED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      CALLID:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      TASKNUMBER:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      EARLYSTART:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      DUEDATE:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      LATESTART:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      OPENDATE:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      PRIORITY:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      STATUS:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      REGION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      DISTRICT:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      POSTCODE:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      TASKTYPE:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      DURATION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      NUMBEROFREQUIREDENGINEERS:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CRITICAL:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CITY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      ISCREWTASK:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      SCHEDULEDSTART:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      SCHEDULEDFINISH:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      ONSITETIMESTAMP:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      COMPLETIONTIMESTAMP:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+  assignments:
+    file: data/raw/W6ASSIGNMENTS.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      REVISION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMECREATED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMEMODIFIED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      STARTTIME:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      FINISHTIME:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      TASK:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      ASSIGNEDENGINEERS:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      ISCREWASSIGNMENT:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      IGNOREINROSTER:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CONTRACTORINDEX:
+        dtype: Float64
+        key:
+        mask:
+        outlier: [None, None]
+
+      Z_CONTRACTOR_ENGR_IND:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      Z_ASSIGNMENTKEY_CHAR:
+        dtype: Float64
+        key:
+        mask:
+        outlier: [None, None]
+  engineers:
+    file: data/raw/W6ENGINEERS.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      REVISION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMECREATED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      TIMEMODIFIED:
+        dtype: datetime64[ns]
+        key:
+        mask:
+        outlier: [None, None]
+
+      NAME:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      DISTRICT:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CALENDAR:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      ENGINEERTYPE:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      # 状态 / 标志
+      ACTIVE:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      TRAVELSPEED:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      INTERNAL:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      MOBILECLIENT:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      EFFICIENCY:
+        dtype: Float64
+        key:
+        mask:
+        outlier: [None, None]
+
+      AVAILABILITYFACTOR:
+        dtype: Float64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CITY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      COMPANY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      CREW:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      MOBILECLIENTSETTINGS:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      BUSINESSUNIT:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      DEPARTMENT:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      CMMDTNUMBER:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      CONTRACTOR:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      FIXEDTRAVEL:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      IGNOREALLPREFERENCES:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      IGNOREFAIRNESSCALCULATION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      PREFERENCEAPPROVED:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      ROSTERAPPROVED:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      LUNCHBREAKDURATION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      HASDYNAMICDATA:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CREWFOREXTERNALUSE:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+  districts:
+    file: districts
+    variables:
+      W6KEY:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      REVISION:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      NAME:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      REGIONPARENT:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      SAMESITETIMERADIUS:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      SAMESITEDISTANCERADIUS:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      CITY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      POSTCODE:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      COMPANY:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      USEDINMOBILE:
+        dtype: Int64
+        key:
+        mask:
+        outlier: [None, None]
+
+      DATAPREPARATIONAMOUNT:
+        dtype: Float64
+        key:
+        mask:
+        outlier: [None, None]
+
+      Z_DISTRICT_ABBR:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      Z_DISTRICT_NAME:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+
+      Z_DISTRICT_CATEGORY:
+        dtype: string
+        key:
+        mask:
+        outlier: [None, None]
+mappings:
+  tasks:
+    links:
+      assignments:
+        left_on: W6KEY
+        right_on: TASK
+
+      task_statuses:
+        left_on: STATUS
+        right_on: W6KEY
+
+      task_types:
+        left_on: TASKTYPE
+        right_on: W6KEY
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  assignments:
+    links:
+      tasks:
+        left_on: TASK
+        right_on: W6KEY
+
+      engineers:
+        left_on: ASSIGNEDENGINEERS
+        right_on: NAME
+
+      districts:
+        left_on: DISTRICTID
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENTID
+        right_on: W6KEY
+
+  engineers:
+    links:
+      assignments:
+        left_on: NAME
+        right_on: ASSIGNEDENGINEERS
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  districts:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+  departments:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+  task_statuses:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: STATUS
+
+  task_types:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: TASKTYPE
+
+
