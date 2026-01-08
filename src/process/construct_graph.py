@@ -5,17 +5,21 @@
 #             if file.endswith(".csv"):
 #                 print(os.path.join(root_dir, file)) #iterate through all csv files in raw_data folder
 
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Dict, List
-import pandas as pd
+from typing import Dict, List, Any
 import yaml
 import polars as pl
 
-from src.process.utils.filter_raw_data import drop_sparse_columns
-# from src.process.utils.convert_columns import convert_with_schema
-# from src.process.utils.convert_columns import remove_outliers_by_spec
-from src.process.utils.inspect_relation import (inspect_task_assignment_relation, inspect_assignments_engineers)
-from src.process.feature_engineering import (build_feature_table, clean_feat_by_keys)
+# Keep your original imports (do not change function names in this file).
+# NOTE: We will override some imported function names below with pure-Polars implementations.
+from src.process.utils.filter_raw_data import drop_sparse_columns as _drop_sparse_columns_pandas
+from src.process.utils.inspect_relation import (
+    inspect_task_assignment_relation as _inspect_task_assignment_relation_pandas,
+    inspect_assignments_engineers as _inspect_assignments_engineers_pandas,
+)
+from src.process.feature_engineering import build_feature_table, clean_feat_by_keys
 from src.process.feature_schema import (
     task_schema,
     engineer_schema,
@@ -24,16 +28,142 @@ from src.process.feature_schema import (
     FeatureSchema,
 )
 
+# -------------------------------------------------
+# Pure-Polars overrides (same function names, so your call sites stay unchanged)
+# -------------------------------------------------
+
+def drop_sparse_columns(
+    df: pl.DataFrame,
+    min_non_na_ratio: float = 0.1,
+    inplace: bool = False,
+    verbose: bool = True,
+) -> pl.DataFrame:
+    """
+    Polars version of drop_sparse_columns.
+    Keeps columns whose non-null ratio >= min_non_na_ratio.
+
+    We intentionally keep the same function name/signature as your pandas utility,
+    so existing call sites remain unchanged.
+    """
+    if df.height == 0:
+        return df
+
+    n = df.height
+    keep_cols: List[str] = []
+    dropped: List[tuple[str, float]] = []
+
+    for c in df.columns:
+        non_null = df.select(pl.col(c).is_not_null().sum()).item()
+        ratio = non_null / n
+        if ratio >= min_non_na_ratio:
+            keep_cols.append(c)
+        else:
+            dropped.append((c, ratio))
+
+    if verbose and dropped:
+        print(f"Dropping {len(dropped)} sparse columns (min_non_na_ratio={min_non_na_ratio}):")
+        for c, r in sorted(dropped, key=lambda x: x[1]):
+            print(f"  - {c}: {r:.4f}")
+
+    # inplace kept for signature compatibility, but Polars is immutable anyway.
+    return df.select(keep_cols)
+
+
+def inspect_task_assignment_relation(
+    tasks_df: pl.DataFrame,
+    assignments_df: pl.DataFrame,
+    task_key_col: str,
+    assign_fk_col: str,
+) -> dict:
+    """
+    Polars version of inspect_task_assignment_relation.
+    Reports basic PK-FK sanity stats.
+    """
+    tasks_keys = tasks_df.select(pl.col(task_key_col).drop_nulls().unique())
+    assigns_fk = assignments_df.select(pl.col(assign_fk_col).drop_nulls().alias("fk"))
+
+    n_tasks_unique = tasks_keys.height
+    n_assign_rows = assignments_df.height
+    n_assign_fk_nonnull = assigns_fk.height
+
+    # Orphan: FK exists in assignments but not in tasks PK set
+    orphan = assigns_fk.join(
+        tasks_keys.rename({task_key_col: "fk"}),
+        on="fk",
+        how="anti",
+    )
+    n_orphan_fk = orphan.height
+
+    # Coverage: how many tasks appear at least once in assignments
+    covered_tasks = tasks_keys.rename({task_key_col: "k"}).join(
+        assigns_fk.rename({"fk": "k"}).unique(),
+        on="k",
+        how="inner",
+    )
+    n_covered_tasks = covered_tasks.height
+
+    return {
+        "n_tasks_unique": int(n_tasks_unique),
+        "n_assignments_rows": int(n_assign_rows),
+        "n_assignments_fk_nonnull": int(n_assign_fk_nonnull),
+        "n_orphan_fk": int(n_orphan_fk),
+        "task_coverage_ratio": (n_covered_tasks / n_tasks_unique) if n_tasks_unique else None,
+    }
+
+
+def inspect_assignments_engineers(
+    assignments_df: pl.DataFrame,
+    engineers_df: pl.DataFrame,
+    left_key: str = "ASSIGNEDENGINEERS",
+    right_key: str = "NAME",
+    top_k: int = 10,
+) -> dict:
+    """
+    Polars version of inspect_assignments_engineers.
+    Reports:
+      - how many non-null engineer keys appear in assignments
+      - how many are orphans (not found in engineers table)
+      - top engineer frequency table
+    """
+    eng_keys = engineers_df.select(pl.col(right_key).drop_nulls().unique())
+    assign_eng = assignments_df.select(pl.col(left_key).drop_nulls().alias("k"))
+
+    orphan = assign_eng.join(
+        eng_keys.rename({right_key: "k"}),
+        on="k",
+        how="anti",
+    )
+
+    top_freq = (
+        assignments_df
+        .filter(pl.col(left_key).is_not_null())
+        .group_by(left_key)
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
+        .head(top_k)
+    )
+
+    return {
+        "n_assignments_eng_nonnull": int(assign_eng.height),
+        "n_orphan_engineers": int(orphan.height),
+        "top_engineers": top_freq,  # Polars DataFrame
+    }
+
+
+# -------------------------------------------------
+# Main pipeline functions (keep names unchanged)
+# -------------------------------------------------
+
 def preprocess_dfs(
-        schema: dict, 
-        df_type: str, 
+        schema: dict,
+        df_type: str,
         drop_sparse: bool=True,
         min_non_na_ratio: float=0.1
     ) -> pl.DataFrame:
     '''
-    Process raw CSV files of a given type into a single DataFrame 
+    Process raw CSV files of a given type into a single DataFrame
     by converting types, removing outliers, and droping sparse columns
-    
+
     Parameters
     ----
     schema : dict
@@ -42,12 +172,13 @@ def preprocess_dfs(
         Dataset type to process, one of "tasks", "assignments", "engineers", "districts".
     drop_sparse : bool
         Whether to drop sparse columns
-    
+
     Return
     ----
     df_concat : pl.DataFrame
     '''
-    assert df_type in ["tasks", "assignments", "engineers", "districts"], "type must be one of 'tasks', 'assignments', 'engineers', 'districts'"
+    assert df_type in ["tasks", "assignments", "engineers", "districts"], \
+        "type must be one of 'tasks', 'assignments', 'engineers', 'districts'"
 
     if df_type == "tasks":
         type_dir = "W6TASKS"
@@ -57,6 +188,8 @@ def preprocess_dfs(
         type_dir = "W6ENGINEERS"
     elif df_type == "districts":
         type_dir = "W6DISTRICTS"
+    else:
+        raise ValueError(f"Unknown df_type={df_type}")
 
     data_dir = Path("data/raw")
     files = sorted(data_dir.glob(f"{type_dir}-*.csv"))
@@ -73,7 +206,7 @@ def preprocess_dfs(
     cols = list(vars_meta.keys())
 
     pl_schema = {
-        col: DTYPE_MAP.get(meta["dtype"], pl.Utf8)   # unknown dtype -> Utf8
+        col: DTYPE_MAP.get(meta.get("dtype", "string"), pl.Utf8)  # unknown dtype -> Utf8
         for col, meta in vars_meta.items()
     }
     print(pl_schema)
@@ -97,8 +230,8 @@ def preprocess_dfs(
     # Outlier filtering
     # --------------------------------------------------------------------
     for col, meta in vars_meta.items():
-        outlier = meta.get("outlier", ['None', 'None'])
-        
+        outlier = meta.get("outlier", ["None", "None"])
+
         # If outlier is a list of two strings, try to interpret as numeric bounds
         lower, upper = outlier[0], outlier[1]
         numeric_bounds = True
@@ -126,21 +259,18 @@ def preprocess_dfs(
             print(f"Column '{col}': kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
 
     # --------------------------------------------------------------------
-    # Sparse column dropping
+    # Sparse column dropping (PURE POLARS now)
     # --------------------------------------------------------------------
     if drop_sparse:
-        # Convert Polars DataFrame to Pandas
-        df_concat_pd = df_concat.to_pandas()
-        df_concat_pd = drop_sparse_columns(
-            df_concat_pd,
+        df_concat = drop_sparse_columns(
+            df_concat,
             min_non_na_ratio=min_non_na_ratio,
             inplace=False,
             verbose=True,
         )
-        # Convert back to Polars DataFrame
-        df_concat = pl.from_pandas(df_concat_pd)
 
     return df_concat
+
 
 def parse_yaml(yaml_path: str) -> dict:
     '''
@@ -148,11 +278,11 @@ def parse_yaml(yaml_path: str) -> dict:
     '''
     with open(yaml_path, "r") as f:
         schema = yaml.safe_load(f)
-    return schema 
+    return schema
 
 
 def process_task_feature(
-        task_df: pl.DataFrame, 
+        task_df: pl.DataFrame,
         schema: FeatureSchema
     ) -> pl.DataFrame:
     '''
@@ -193,8 +323,9 @@ def process_engineer_feature(
     ...
     return engineer_feat
 
+
 def process_assignment_feature(
-        assignment_df: pl.DataFrame, 
+        assignment_df: pl.DataFrame,
         schema: FeatureSchema
     ) -> pl.DataFrame:
     '''
@@ -211,6 +342,7 @@ def process_assignment_feature(
     )
     ...
     return assignment_feat
+
 
 def process_district_feature(
         district_df: pl.DataFrame,
@@ -233,7 +365,7 @@ def process_district_feature(
 
 
 if __name__ == "__main__":
-    # How to run this file: 
+    # How to run this file:
     # python -m src.process.construct_graph
 
     schema = parse_yaml("data/data.yaml")
@@ -243,47 +375,48 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------
     task_df = preprocess_dfs(schema, "tasks")
     task_df = task_df.with_columns(
-       (pl.col("SCHEDULEDFINISH") - pl.col("SCHEDULEDSTART")).alias("SCHEDULECOMPLETIONTIME")
+        (pl.col("SCHEDULEDFINISH") - pl.col("SCHEDULEDSTART")).alias("SCHEDULECOMPLETIONTIME")
     )
-    
+
     assignment_df = preprocess_dfs(schema, "assignments")
-    
+
     engineer_df = preprocess_dfs(schema, "engineers")
-    
+
     district_df = preprocess_dfs(schema, "districts")
     district_df = district_df.with_columns(
-       pl.col("POSTCODE").str.slice(0, 5).alias("POSTCODE")
+        pl.col("POSTCODE").cast(pl.Utf8).str.slice(0, 5).alias("POSTCODE")
     )
-    
+
     # --------------------------------------------------------------------
-    # Inspect relationships between tables
+    # Inspect relationships between tables (PURE POLARS now)
     # --------------------------------------------------------------------
     join_key_dict = schema["mappings"]
     keys = join_key_dict["tasks"]["links"]["assignments"]
-    task_key_col   = keys["left_on"]   # 应该是 "W6KEY"
-    assign_fk_col  = keys["right_on"]  # 应该是 "TASK"
+    task_key_col   = keys["left_on"]   # expected "W6KEY"
+    assign_fk_col  = keys["right_on"]  # expected "TASK"
 
     print(f"tasks.{task_key_col}  ↔  assignments.{assign_fk_col}")
-    
-    # 用你现在的表名，自己选：tasks / tasks_norm, assignments / assignments_norm
+
     task_assignment_relation_summary = inspect_task_assignment_relation(
-        task_df.to_pandas(),           # 或 tasks_norm
-        assignment_df.to_pandas(),     # 或 assignments_norm
+        task_df,
+        assignment_df,
         task_key_col=task_key_col,
         assign_fk_col=assign_fk_col,
     )
+    print(task_assignment_relation_summary)
 
     assignemnt_engineer_relation_summary = inspect_assignments_engineers(
-        assignments_df=assignment_df.to_pandas(),
-        engineers_df=engineer_df.to_pandas(),
+        assignments_df=assignment_df,
+        engineers_df=engineer_df,
         left_key="ASSIGNEDENGINEERS",
-        right_key="NAME",    # 如果你最后决定用 CREW 则改成 "CREW"
+        right_key="NAME",    # change to "CREW" if you decide to use CREW
+        top_k=10,
     )
+    print(assignemnt_engineer_relation_summary["top_engineers"])
 
     # --------------------------------------------------------------------
     # Feature engineering
     # --------------------------------------------------------------------
-
     task_feat = process_task_feature(task_df, task_schema)
     engineer_feat = process_engineer_feature(engineer_df, engineer_schema)
     assignment_feat = process_assignment_feature(assignment_df, assignment_schema)
@@ -295,16 +428,12 @@ if __name__ == "__main__":
         primary_key="W6KEY",
     )
 
-    # 2) 清理 engineer_feat
     engineer_feat_clean = clean_feat_by_keys(
         engineer_feat,
         key_cols=engineer_schema.key_cols,
         primary_key="NAME",
     )
 
-    # 3) 清理 assignment_feat
-    #    这里我们把 TASK 当 primary_key，
-    #    行只保留：TASK 非空，且至少有 ASSIGNEDENGINEERS / DISTRICTID / DEPARTMENTID 里一个非空
     assignment_feat_clean = clean_feat_by_keys(
         assignment_feat,
         key_cols=assignment_schema.key_cols,
@@ -317,3 +446,10 @@ if __name__ == "__main__":
         primary_key="W6KEY",
     )
 
+    # save (Parquet supports Duration/D datetime types safely)
+    Path("data/processed").mkdir(parents=True, exist_ok=True)
+    task_feat_clean.write_parquet(Path("data/processed/tasks_processed.parquet"))
+    assignment_feat_clean.write_parquet(Path("data/processed/assignments_processed.parquet"))
+    engineer_feat_clean.write_parquet(Path("data/processed/engineers_processed.parquet"))
+    district_feat_clean.write_parquet(Path("data/processed/districts_processed.parquet"))
+    print("Feature tables saved to data/processed/")

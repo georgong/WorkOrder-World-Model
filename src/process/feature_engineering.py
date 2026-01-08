@@ -1,83 +1,94 @@
 from __future__ import annotations
+
 from typing import List
-import pandas as pd
-import numpy as np
+import math
+import polars as pl
+
 
 def _add_time_features(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     time_cols: List[str],
     prefix: str,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
-    对每个时间列:
-      - 若为 datetime-like:
-          解析为 datetime
-          提取 year/month/day/hour
-          对 month/day/hour 做 sin/cos 周期编码
-        列名形如:
-          {prefix}_{col}_year
-          {prefix}_{col}_month / _month_sin / _month_cos
-          {prefix}_{col}_day   / _day_sin   / _day_cos
-          {prefix}_{col}_hour  / _hour_sin  / _hour_cos
+    For each time column:
+      - If duration-like: add sec / hours / days numeric features
+      - Else (datetime-like): parse to Datetime, extract year/month/day/hour,
+        and add cyclic sin/cos for month/day/hour.
 
-      - 若为 timedelta-like:
-          提取 sec / hours / days 数值特征
-        列名形如:
-          {prefix}_{col}_sec
-          {prefix}_{col}_hours
-          {prefix}_{col}_days
+    Output column names:
+      {prefix}_{col}_year
+      {prefix}_{col}_month, _month_sin, _month_cos
+      {prefix}_{col}_day,   _day_sin,   _day_cos
+      {prefix}_{col}_hour,  _hour_sin,  _hour_cos
+
+    For durations:
+      {prefix}_{col}_sec, _hours, _days
     """
-    df = df.copy()
+    exprs: List[pl.Expr] = []
+    two_pi = 2.0 * math.pi
+
+    def cyc(raw: pl.Expr, period: float, name: str) -> List[pl.Expr]:
+        # raw is an expression (NOT a column reference string)
+        radians = raw * (two_pi / period)
+        return [
+            radians.sin().alias(f"{name}_sin"),
+            radians.cos().alias(f"{name}_cos"),
+        ]
 
     for col in time_cols:
         if col not in df.columns:
             continue
 
-        s = df[col]
-        dtype = s.dtype
-
-        # 1) Timedelta 分支：用 total_seconds / hours / days
-        if np.issubdtype(dtype, np.timedelta64):
-            base = f"{prefix}_{col}"
-            td = pd.to_timedelta(s, errors="coerce")
-
-            sec = td.dt.total_seconds().astype("Float64")
-            df[f"{base}_sec"]   = sec
-            df[f"{base}_hours"] = sec / 3600.0
-            df[f"{base}_days"]  = sec / 86400.0
-            continue  # 不走 datetime 分支
-
-        # 2) 其他情况，当作 datetime 解析
-        dt = pd.to_datetime(s, errors="coerce")
-
+        dtype = df.schema[col]
         base = f"{prefix}_{col}"
 
-        year_col = f"{base}_year"
-        month_col = f"{base}_month"
-        day_col = f"{base}_day"
-        hour_col = f"{base}_hour"
+        # -------------------------
+        # Duration branch
+        # -------------------------
+        if dtype == pl.Duration:
+            sec_raw = pl.col(col).dt.total_seconds().cast(pl.Float64)
+            exprs.extend([
+                sec_raw.alias(f"{base}_sec"),
+                (sec_raw / 3600.0).alias(f"{base}_hours"),
+                (sec_raw / 86400.0).alias(f"{base}_days"),
+            ])
+            continue
 
-        df[year_col] = dt.dt.year.astype("Float64")
-        df[month_col] = dt.dt.month.astype("Float64")
-        df[day_col] = dt.dt.day.astype("Float64")
-        df[hour_col] = dt.dt.hour.astype("Float64")
+        # -------------------------
+        # Datetime branch
+        # -------------------------
+        dt = pl.col(col)
+        if dtype == pl.Date:
+            dt = dt.cast(pl.Datetime("ns"))
+        elif dtype != pl.Datetime and dtype != pl.Datetime("ns"):
+            # parse strings -> datetime
+            dt = dt.cast(pl.Utf8).str.to_datetime(strict=False)
 
-        # 周期特征：month / day / hour
-        for base_col, period in [
-            (month_col, 12),
-            (day_col, 31),
-            (hour_col, 24),
-        ]:
-            vals = df[base_col].astype("Float64")
-            radians = 2 * np.pi * vals / period
-            df[f"{base_col}_sin"] = np.sin(radians)
-            df[f"{base_col}_cos"] = np.cos(radians)
+        # Use raw expressions for cyclic features (no referencing newly created cols)
+        year_raw  = dt.dt.year().cast(pl.Float64)
+        month_raw = dt.dt.month().cast(pl.Float64)
+        day_raw   = dt.dt.day().cast(pl.Float64)
+        hour_raw  = dt.dt.hour().cast(pl.Float64)
 
-    return df
+        # Base extracted components
+        exprs.extend([
+            year_raw.alias(f"{base}_year"),
+            month_raw.alias(f"{base}_month"),
+            day_raw.alias(f"{base}_day"),
+            hour_raw.alias(f"{base}_hour"),
+        ])
+
+        # Cyclic encodings directly from raw expressions
+        exprs.extend(cyc(month_raw, 12.0, f"{base}_month"))
+        exprs.extend(cyc(day_raw,   31.0, f"{base}_day"))
+        exprs.extend(cyc(hour_raw,  24.0, f"{base}_hour"))
+
+    return df.with_columns(exprs) if exprs else df
 
 
 def build_feature_table(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     *,
     key_col: str,
     category_cols: List[str],
@@ -85,135 +96,147 @@ def build_feature_table(
     time_cols: List[str],
     prefix: str,
     top_k_per_cat: int = 30,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
-    通用特征构造函数（task / engineer / 其它表都能用）。
-
-    参数:
-      - key_col: 主键列名（如 "W6KEY" / "NAME"）
-      - category_cols: 需要做 one-hot 的类别列
-      - numeric_cols: 直接当数值的列（转 numeric）
-      - time_cols: 时间列，做 year/month/day/hour + sin/cos
-      - prefix: 这一类实体的前缀 ("task", "eng" ...)
-      - top_k_per_cat: 每个 categorical 列保留的最多类别数（按频率排序）
-                       其余压成 "__OTHER__"
+    Generic feature table builder (polars version).
+    - numeric: cast to Float64 and rename with prefix
+    - time: add derived time features (year/month/day/hour + sin/cos OR duration seconds/hours/days)
+    - categorical: keep top-K values by frequency, compress others to "__OTHER__", then one-hot
     """
-    df = df.copy()
+    df = df.clone()
 
+    # 1) numeric columns: cast + rename with prefix
+    numeric_cols_exist = [c for c in numeric_cols if c in df.columns]
+    num_renames = {c: f"{prefix}_{c}" for c in numeric_cols_exist}
 
-    # 1) 数值列：存在的就转 numeric，然后统一加前缀
-    numeric_cols = [c for c in numeric_cols if c in df.columns]
-    for c in numeric_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    num_exprs = []
+    for c in numeric_cols_exist:
+        num_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(num_renames[c]))
+    if num_exprs:
+        df = df.with_columns(num_exprs)
 
-    numeric_renames = {c: f"{prefix}_{c}" for c in numeric_cols}
-    df = df.rename(columns=numeric_renames)
-    prefixed_numeric_cols = list(numeric_renames.values())
+    prefixed_numeric_cols = list(num_renames.values())
 
-    # 2) 时间派生列
+    # 2) time features
     time_cols_exist = [c for c in time_cols if c in df.columns]
     df = _add_time_features(df, time_cols_exist, prefix=prefix)
 
+    # collect derived time cols by prefix pattern
     time_derived_cols: List[str] = []
     for t in time_cols_exist:
-        base = f"{prefix}_{t}_"
-        time_derived_cols.extend([c for c in df.columns if c.startswith(base)])
+        base_prefix = f"{prefix}_{t}_"
+        time_derived_cols.extend([c for c in df.columns if c.startswith(base_prefix)])
     time_derived_cols = sorted(set(time_derived_cols))
 
-    # 3) 类别列：压缩到 top-K + "__OTHER__"，再 one-hot
+    # 3) categorical: top-k compression + one-hot
     cat_cols_exist = [c for c in category_cols if c in df.columns]
-
     for c in cat_cols_exist:
-        # 先统一成 string
-        s = df[c].astype("string")
+        # Get top-k non-null categories (as strings)
+        top_vals = (
+            df.select(pl.col(c).cast(pl.Utf8))
+              .to_series()
+              .drop_nulls()
+              .value_counts()
+              .sort("count", descending=True)
+              .head(top_k_per_cat)
+              .get_column(c)
+              .to_list()
+        )
+        top_set = set(top_vals)
 
-        # 统计频率，取 top-K
-        vc = s.value_counts(dropna=True)
-        top_vals = set(vc.head(top_k_per_cat).index)
+        # Compress: null stays null; non-top becomes "__OTHER__"
+        df = df.with_columns(
+            pl.when(pl.col(c).is_null())
+              .then(pl.lit(None, dtype=pl.Utf8))
+              .when(pl.col(c).cast(pl.Utf8).is_in(list(top_set)))
+              .then(pl.col(c).cast(pl.Utf8))
+              .otherwise(pl.lit("__OTHER__", dtype=pl.Utf8))
+              .alias(c)
+        )
 
-        def compress(v):
-            if pd.isna(v):
-                return pd.NA
-            return v if v in top_vals else "__OTHER__"
-
-        df[c] = s.map(compress)
-
+    # One-hot encode (no dummy for null by default in polars)
     if cat_cols_exist:
-        df_cat = pd.get_dummies(
-            df[cat_cols_exist],
-            prefix=[f"{prefix}_{c}" for c in cat_cols_exist],
-            dummy_na=False,  # NaN 不单独出列，留在全 0
-        ).astype("Int64")
+        # Prefix each categorical column name in dummy output
+        # Polars to_dummies uses col name + "_" + value; we first rename cols to include prefix.
+        rename_for_dummy = {c: f"{prefix}_{c}" for c in cat_cols_exist}
+        df_for_dummy = df.select([pl.col(c).alias(rename_for_dummy[c]) for c in cat_cols_exist])
+        df_cat = df_for_dummy.to_dummies()  # UInt8 columns
     else:
-        df_cat = pd.DataFrame(index=df.index)
+        df_cat = pl.DataFrame()
 
-    # 4) 组装：基表 + one-hot 表
-    base_cols = key_col + prefixed_numeric_cols + time_derived_cols
-    base_df = df[base_cols].copy()
+    # 4) assemble base + dummy
+    base_cols = [key_col] + prefixed_numeric_cols + time_derived_cols
+    base_cols = [c for c in base_cols if c in df.columns]  # be tolerant
 
-    feature_df = base_df.join(df_cat)
-    feature_df = feature_df.loc[:, ~feature_df.columns.duplicated()]
-    feature_df = feature_df.drop(category_cols + time_cols, axis=1, errors='ignore')
+    base_df = df.select(base_cols)
+
+    feature_df = base_df.hstack(df_cat) if df_cat.width > 0 else base_df
+
+    # Drop original categorical/time raw columns (keep only engineered)
+    drop_cols = [c for c in (category_cols + time_cols) if c in feature_df.columns]
+    if drop_cols:
+        feature_df = feature_df.drop(drop_cols)
 
     return feature_df
 
 
-
-def _non_empty_mask(s: pd.Series) -> pd.Series:
+def _non_empty_mask(expr: pl.Expr, dtype: pl.DataType) -> pl.Expr:
     """
-    Helper function for clean_feat_by_keys.
-
-    判断一列哪些是“有内容”的：
-      - 数值列: notna()
-      - 其它: 转 string，非 NaN 且长度 > 0
+    Non-empty definition (polars expr version):
+      - numeric: not null
+      - others: cast to Utf8, not null AND length > 0
     """
-    if pd.api.types.is_numeric_dtype(s.dtype):
-        return ~s.isna()
+    if dtype.is_numeric():
+        return expr.is_not_null()
     else:
-        s2 = s.astype("string")
-        return s2.notna() & (s2.str.len() > 0)
+        s = expr.cast(pl.Utf8)
+        return s.is_not_null() & (s.str.len_chars() > 0)
+
 
 def clean_feat_by_keys(
-    df: pd.DataFrame,
+    df: pl.DataFrame,
     *,
     key_cols: List[str],
     primary_key: str,
-) -> pd.DataFrame:
+) -> pl.DataFrame:
     """
-    通用清洗规则（3 个 feat 都用这个）:
+    Keep rows satisfying:
+      1) primary_key is non-empty
+      2) among other key_cols, at least one is non-empty
 
-    保留的行满足：
-      1) primary_key 非空
-      2) 在其它 key_cols 里面，至少有一个非空
-
-    丢弃：
-      - primary_key 为空
-      - primary_key 非空，但其它 key 全空 → 完全独立点，扔掉
+    Robust behavior:
+      - If some key columns are missing, DO NOT raise.
+      - Filter using the intersection of key_cols and df.columns.
+      - If primary_key is missing, return df unchanged (can't validate rule 1).
+      - If no other keys exist in df, fallback to rule 1 only.
     """
-    df = df.copy()
-    if len(key_cols) == 1:
-        return df.copy()
+    if len(key_cols) <= 1:
+        return df.clone()
 
     if primary_key not in key_cols:
-        raise ValueError(f"primary_key {primary_key!r} 不在 key_cols 里")
+        raise ValueError(f"primary_key {primary_key!r} not in key_cols")
 
-    for c in key_cols:
-        if c not in df.columns:
-            raise KeyError(f"df 缺少 key 列 {c!r}")
+    # Only use columns that actually exist in df
+    existing = [c for c in key_cols if c in df.columns]
 
-    # 1) 主键非空
-    mask_primary = _non_empty_mask(df[primary_key])
+    # If primary key itself is missing, we cannot enforce rule (1)
+    if primary_key not in existing:
+        # Do not crash; just return df as-is
+        return df.clone()
 
-    # 2) 其它 key 至少有一个非空
-    other_keys = [c for c in key_cols if c != primary_key]
+    schema = df.schema
 
-    if other_keys:
-        other_masks = [_non_empty_mask(df[c]) for c in other_keys]
-        mask_any_other = other_masks[0]
-        for m in other_masks[1:]:
-            mask_any_other = mask_any_other | m
-    else:
-            mask_any_other = False   # 等价于“没有一行满足第二条”
-        # 这种情况下一般你也不会来用这个函数
+    mask_primary = _non_empty_mask(pl.col(primary_key), schema[primary_key])
+
+    other_keys = [c for c in existing if c != primary_key]
+    if not other_keys:
+        # Can't enforce rule (2). Fallback: keep rows satisfying rule (1) only.
+        return df.filter(mask_primary)
+
+    mask_any_other = None
+    for c in other_keys:
+        m = _non_empty_mask(pl.col(c), schema[c])
+        mask_any_other = m if mask_any_other is None else (mask_any_other | m)
+
     keep = mask_primary & mask_any_other
-    return df[keep].copy()
+    return df.filter(keep)
