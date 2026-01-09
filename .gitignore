@@ -57,3 +57,12 @@ checkpoints/
 # Weights
 ########################
 .pt
+
+
+# data / exports / large files
+cleaned_result/
+click 2/
+data explore/
+*.csv
+*.7z
+*.zip
