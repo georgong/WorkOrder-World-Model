@@ -33,7 +33,7 @@ datasets:
       FINISHTIME:
         dtype: datetime64[ns]
         key: false
-        mask: false
+        mask: true
         outlier:
         - null
         - null
@@ -102,14 +102,14 @@ datasets:
         - null
       W6KEY:
         dtype: Int64
-        key: false
+        key: true
         mask: false
         outlier:
         - -4571473.0
         - 11492655.0
       Z_ASSIGNMENTKEY_CHAR:
         dtype: Float64
-        key: false
+        key: true
         mask: false
         outlier:
         - -4508686.5
@@ -286,7 +286,7 @@ datasets:
         - null
       CMMDTNUMBER:
         dtype: string
-        key: false
+        key: true
         mask: false
         outlier:
         - null
@@ -392,13 +392,13 @@ datasets:
       LASTALLOCATIONFINISH:
         dtype: string
         key: false
-        mask: false
+        mask: true
         outlier:
         - null
         - null
       LOCATIONID:
         dtype: string
-        key: false
+        key: true
         mask: false
         outlier:
         - null
@@ -406,14 +406,14 @@ datasets:
       LOGINTIME:
         dtype: string
         key: false
-        mask: false
+        mask: true
         outlier:
         - null
         - null
       LOGOUTTIME:
         dtype: string
         key: false
-        mask: false
+        mask: true
         outlier:
         - null
         - null
@@ -454,7 +454,7 @@ datasets:
         - null
       NAME:
         dtype: string
-        key: false
+        key: true
         mask: false
         outlier:
         - null
@@ -511,7 +511,7 @@ datasets:
       TIMEMODIFIED:
         dtype: datetime64[ns]
         key: false
-        mask: false
+        mask: true
         outlier:
         - null
         - null
@@ -524,7 +524,7 @@ datasets:
         - null
       W6KEY:
         dtype: Int64
-        key: false
+        key: true
         mask: false
         outlier:
         - -21588.0
