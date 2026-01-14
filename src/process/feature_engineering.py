@@ -27,6 +27,7 @@ def _add_time_features(
     """
     exprs: List[pl.Expr] = []
     two_pi = 2.0 * math.pi
+    
 
     def cyc(raw: pl.Expr, period: float, name: str) -> List[pl.Expr]:
         # raw is an expression (NOT a column reference string)
@@ -90,7 +91,7 @@ def _add_time_features(
 def build_feature_table(
     df: pl.DataFrame,
     *,
-    key_col: str,
+    key_col: List[str],
     category_cols: List[str],
     numeric_cols: List[str],
     time_cols: List[str],
@@ -165,7 +166,7 @@ def build_feature_table(
         df_cat = pl.DataFrame()
 
     # 4) assemble base + dummy
-    base_cols = [key_col] + prefixed_numeric_cols + time_derived_cols
+    base_cols = key_col + prefixed_numeric_cols + time_derived_cols
     base_cols = [c for c in base_cols if c in df.columns]  # be tolerant
 
     base_df = df.select(base_cols)
@@ -240,3 +241,4 @@ def clean_feat_by_keys(
 
     keep = mask_primary & mask_any_other
     return df.filter(keep)
+
