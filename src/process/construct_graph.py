@@ -177,16 +177,16 @@ def preprocess_dfs(
     ----
     df_concat : pl.DataFrame
     '''
-    assert df_type in ["tasks", "assignments", "engineers", "districts"], \
+    assert df_type in ["w6tasks", "w6assignments", "w6engineers", "w6districts"], \
         "type must be one of 'tasks', 'assignments', 'engineers', 'districts'"
 
-    if df_type == "tasks":
+    if df_type == "w6tasks":
         type_dir = "W6TASKS"
-    elif df_type == "assignments":
+    elif df_type == "w6assignments":
         type_dir = "W6ASSIGNMENTS"
-    elif df_type == "engineers":
+    elif df_type == "w6engineers":
         type_dir = "W6ENGINEERS"
-    elif df_type == "districts":
+    elif df_type == "w6districts":
         type_dir = "W6DISTRICTS"
     else:
         raise ValueError(f"Unknown df_type={df_type}")
@@ -368,21 +368,21 @@ if __name__ == "__main__":
     # How to run this file:
     # python -m src.process.construct_graph
 
-    schema = parse_yaml("data/data.yaml")
+    schema = parse_yaml("configs/data.yaml")
 
     # --------------------------------------------------------------------
     # Preprocess dataframes
     # --------------------------------------------------------------------
-    task_df = preprocess_dfs(schema, "tasks")
+    task_df = preprocess_dfs(schema, "w6tasks")
     task_df = task_df.with_columns(
         (pl.col("SCHEDULEDFINISH") - pl.col("SCHEDULEDSTART")).alias("SCHEDULECOMPLETIONTIME")
     )
 
-    assignment_df = preprocess_dfs(schema, "assignments")
+    assignment_df = preprocess_dfs(schema, "w6assignments")
 
-    engineer_df = preprocess_dfs(schema, "engineers")
+    engineer_df = preprocess_dfs(schema, "w6engineers")
 
-    district_df = preprocess_dfs(schema, "districts")
+    district_df = preprocess_dfs(schema, "w6districts")
     district_df = district_df.with_columns(
         pl.col("POSTCODE").cast(pl.Utf8).str.slice(0, 5).alias("POSTCODE")
     )
