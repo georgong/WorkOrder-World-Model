@@ -2189,3 +2189,91 @@ datasets:
         outlier:
         - null
         - null
+
+mappings:
+  tasks:
+    links:
+      assignments:
+        left_on: W6KEY
+        right_on: TASK
+
+      task_statuses:
+        left_on: STATUS
+        right_on: W6KEY
+
+      task_types:
+        left_on: TASKTYPE
+        right_on: W6KEY
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  assignments:
+    links:
+      tasks:
+        left_on: TASK
+        right_on: W6KEY
+
+      engineers:
+        left_on: ASSIGNEDENGINEERS
+        right_on: NAME
+
+      districts:
+        left_on: DISTRICTID
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENTID
+        right_on: W6KEY
+
+  engineers:
+    links:
+      assignments:
+        left_on: NAME
+        right_on: ASSIGNEDENGINEERS
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  districts:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+  departments:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+  task_statuses:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: STATUS
+
+  task_types:
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: TASKTYPE
+
