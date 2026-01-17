@@ -80,7 +80,7 @@ datasets:
         - null
         - null
       TASK:
-        dtype: Float64
+        dtype: Int64
         key: false
         mask: false
         outlier:
