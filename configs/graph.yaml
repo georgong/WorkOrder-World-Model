@@ -1,0 +1,651 @@
+datasets:
+  assignments:
+    file: data/raw/W6ASSIGNMENTS.csv
+    variables:
+      ASSIGNEDENGINEERS:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: null
+
+      CITY:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+
+      DURATION:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: edge
+
+      FINISHTIME:
+        dtype: datetime64[ns]
+        key: false
+        mask: true
+        trait_type: edge
+
+      STARTTIME:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+
+      Z_ASSIGNMENTKEY_CHAR:
+        dtype: Float64
+        key: true
+        mask: false
+        trait_type: node
+  
+      TASK:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+
+
+
+  departments:
+    file: data/raw/W6DEPARTMENT.csv
+    variables:
+      NAME:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+
+  districts:
+    file: data/raw/W6DISTRICTS.csv
+    variables:
+      CITY:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+
+
+      COMPANY:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+
+      NAME:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+
+
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      
+
+
+
+  engineers:
+    file: data/raw/W6ENGINEERS.csv
+    variables:
+      NAME:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      ENGINEERTYPE:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      AVAILABILITYFACTOR:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      ACTIVE:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      CREW:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      DEPARTMENT:
+        dtype: Int64
+        key: false      
+        mask: false
+        trait_type: node
+      DISTRICT:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      EFFICIENCY:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+
+  tasks:
+    file: data/raw/W6TASKS.csv
+    variables:
+      # --- keys / identifiers (node) ---
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      DISTRICT:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      
+      DEPARTMENT:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      CALLID:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      FUNCTLOCREFNBR:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      SEMPRAFACILITYID:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      Z_TASKKEY_CHAR:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+
+      # --- core scheduling / time (edge) ---
+      DUEDATE:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      SCHEDULEDFINISH:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      SCHEDULEDSTART:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      Z_SCHEDULEDSTART_DATE:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      Z_SCHEDULEDFINISH_DATE:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      DURATION:
+        dtype: Float64
+        key: false
+        mask: true
+        trait_type: edge
+      DAYSFROMDUEDATE:
+        dtype: Float64
+        key: false
+        mask: true
+        trait_type: edge
+
+      # --- resource / requirements (node) ---
+      NUMBEROFREQUIREDENGINEERS:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      REQUIREDCREWSIZE:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      ISCREWTASK:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+
+      # --- priority / state (edge) ---
+      PRIORITY:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      STATUS:
+        dtype: Int64
+        key: false
+        mask: true
+        trait_type: edge
+      JEOPARDYSTATE:
+        dtype: Float64
+        key: false
+        mask: true
+        trait_type: edge
+      INJEOPARDY:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: edge
+      REGION:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      TASKTYPE:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+
+  task_statuses:
+    file: data/raw/W6TASK_STATUSES.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      NAME:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      REVISION:
+        dtype: string
+        key: false
+        mask: true
+        trait_type: edge
+      USEDINMOBILE:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+
+  task_types:
+    file: data/raw/W6TASK_TYPES.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      NAME:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      PRIORITY:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: node
+      # requirements (node)
+      ISCREWTASK:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      NUMBEROFREQUIREDENGINEERS:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      REQUIREDCREWSIZE:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+
+      # default estimates / business params (node)
+      DURATION:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+
+      COSTPERTIMEUNIT:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      TIMEUNIT:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+
+      # bookkeeping (edge-ish)
+      REVISION:
+        dtype: Int64
+        key: false
+        mask: true
+        trait_type: edge
+
+      # optional identifiers / grouping (node)
+      COMPANY:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      PRIORITYCODEDEPT:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      Z_ORDER_TYPE_CATEGORY:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      TASKREVENUE:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+      SEMPRAINTERRUPTFLAG:
+        dtype: Float64
+        key: false
+        mask: false
+        trait_type: node
+  equipment:
+    file: data/raw/W6EQUIPMENT.csv
+    variables:
+      # --- keys / identifiers (node) ---
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      CALLID:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      INTEQUIID:
+        dtype: Float64
+        key: true
+        mask: false
+        trait_type: node
+      EQUIPMENTNBR:
+        dtype: Float64
+        key: true
+        mask: false
+        trait_type: node
+      LEGACYID:
+        dtype: Float64
+        key: true
+        mask: false
+        trait_type: node
+
+      # --- equipment type / description (node) ---
+      EQUITYPE:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      EQUIDESCR:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      OBJECTTYPEDESC:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      MAINTPLANTYPE:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      MATERIAL:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+
+      # --- install / lifecycle (edge-ish: time-varying in practice) ---
+      INSTALLDATE:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      STARTUPDATE:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      TIMECREATED:
+        dtype: datetime64[ns]
+        key: false
+        mask: false
+        trait_type: edge
+      TIMEMODIFIED:
+        dtype: datetime64[ns]
+        key: false
+        mask: true
+        trait_type: edge
+      REVISION:
+        dtype: Int64
+        key: false
+        mask: true
+        trait_type: edge
+
+      # --- operational flags (edge) ---
+      EQFOLLOWUPREQD:
+        dtype: Int64
+        key: false
+        mask: true
+        trait_type: edge
+      UNPLANNEDIND:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: edge
+      PLANNEDINSPECTIONIND:
+        dtype: Int64
+        key: false
+        mask: false
+        trait_type: edge
+
+      # --- geo / org linkage (node) ---
+      CITY:
+        dtype: string
+        key: true
+        mask: false
+        trait_type: node
+      STATE:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      POSTCODE:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+
+  regions:
+    file: data/raw/W6REGIONS.csv
+    variables:
+      W6KEY:
+        dtype: Int64
+        key: true
+        mask: false
+        trait_type: node
+      NAME:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      Z_REGION_ABBR:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      Z_REGION_NAME:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      COMPANY:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      DEPARTMENTPARENT:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      USEDINMOBILE:
+        dtype: string
+        key: false
+        mask: false
+        trait_type: node
+      REVISION:
+        dtype: string
+        key: false
+        mask: true
+        trait_type: edge
+mappings:
+  tasks: 
+    name: W6KEY
+    entity_key: W6KEY
+    links:
+      assignments:
+        left_on: W6KEY
+        right_on: TASK
+
+      task_statuses:
+        left_on: STATUS
+        right_on: W6KEY
+
+      task_types:
+        left_on: TASKTYPE
+        right_on: W6KEY
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  assignments:
+    name: W6KEY
+    entity_key: W6KEY
+    links:
+      tasks:
+        left_on: TASK
+        right_on: W6KEY
+
+      engineers:
+        left_on: ASSIGNEDENGINEERS
+        right_on: NAME
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  engineers:
+    entity_key: NAME
+    name: NAME
+    links:
+      assignments:
+        left_on: NAME
+        right_on: ASSIGNEDENGINEERS
+
+      districts:
+        left_on: DISTRICT
+        right_on: W6KEY
+
+      departments:
+        left_on: DEPARTMENT
+        right_on: W6KEY
+
+  districts:
+    name: NAME
+    entity_key: W6KEY
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DISTRICT
+
+  departments:
+    name: NAME
+    entity_key: W6KEY
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+      engineers:
+        left_on: W6KEY
+        right_on: DEPARTMENT
+
+  task_statuses:
+    name: NAME
+    entity_key: W6KEY
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: STATUS
+
+  task_types:
+    name: NAME
+    entity_key: W6KEY
+    links:
+      tasks:
+        left_on: W6KEY
+        right_on: TASKTYPE
+
+      
+
