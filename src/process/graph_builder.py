@@ -1,719 +1,467 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
+from logging import Logger
 from typing import Any, Dict, List, Optional, Tuple
-from collections import Counter
-
 import polars as pl
+from torch_geometric.data import HeteroData
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+import torch
+import numpy as np
+import yaml
 
-# Optional torch / pyg
-try:
-    import torch
-    from torch_geometric.data import HeteroData
-except Exception:
-    torch = None
-    HeteroData = None
+DTYPE_MAP = {
+    "Int64": pl.Int64,
+    "Float64": pl.Float64,
+    "string": pl.Utf8,
+    "datetime64[ns]": pl.Datetime("ns"),
+}
 
-
-# ----------------------------
-# Small utilities (strict!)
-# ----------------------------
-
-def _assert_unique_columns(df: pl.DataFrame, *, where: str) -> None:
-    cnt = Counter(df.columns)
-    dup = {k: v for k, v in cnt.items() if v > 1}
-    assert not dup, f"[{where}] duplicate column names in DataFrame: {dup}. cols={df.columns}"
+NULL_VALUES = ["", " ", "NA", "N/A", "NULL", "null", "None"]
 
 
-def _dedup_keep_order(cols: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for c in cols:
-        if c not in seen:
-            out.append(c)
-            seen.add(c)
+TYPE_DIR_MAP = {
+    "tasks": "W6TASKS",
+    "assignments": "W6ASSIGNMENTS",
+    "engineers": "W6ENGINEERS",
+    "districts": "W6DISTRICTS",
+    "departments": "W6DEPARTMENT",
+    "task_statuses": "W6TASK_STATUSES",
+    "task_types": "W6TASK_TYPES",
+    "equipment": "W6EQUIPMENT",
+    "regions": "W6REGIONS",
+}
+def _resolve_files(data_dir: Path, base: str) -> List[Path]:
+    """
+    Prefer sharded files: BASE-*.csv
+    Fallback: BASE.csv
+    """
+    shards = sorted(data_dir.glob(f"{base}-*.csv"))
+    if shards:
+        return shards
+    single = data_dir / f"{base}.csv"
+    if single.exists():
+        return [single]
+    # last fallback: maybe user wrote lowercase or weird
+    return []
+
+def load_table(schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw") -> pl.DataFrame:
+    assert df_type in TYPE_DIR_MAP, f"df_type must be one of {sorted(TYPE_DIR_MAP.keys())} but got {df_type!r}"
+
+    data_dir_p = Path(data_dir)
+    base = TYPE_DIR_MAP[df_type]
+    files = _resolve_files(data_dir_p, base)
+    if not files:
+        raise FileNotFoundError(f"No files found for {df_type=} under {data_dir_p} (expected {base}.csv or {base}-*.csv)")
+
+    # schema path: schema["datasets"][df_type]["variables"]  (your earlier layout)
+    vars_meta = schema["datasets"][df_type]["variables"]
+    cols = list(vars_meta.keys())
+
+    pl_schema = {
+        col: DTYPE_MAP.get(meta.get("dtype", "string"), pl.Utf8)
+        for col, meta in vars_meta.items()
+    }
+
+    dfs: List[pl.DataFrame] = []
+    for f in files:
+        df = pl.read_csv(
+            f,
+            columns=cols,                     # only keep known columns
+            schema_overrides=pl_schema,        # enforce dtypes
+            null_values=NULL_VALUES,
+            ignore_errors=True,
+            truncate_ragged_lines=True,
+        )
+
+        # ensure all requested columns exist (some shards may miss a column)
+        missing = [c for c in cols if c not in df.columns]
+        if missing:
+            df = df.with_columns([pl.lit(None).cast(pl_schema[c]).alias(c) for c in missing]).select(cols)
+        else:
+            df = df.select(cols)
+
+        dfs.append(df)
+
+    df_concat = pl.concat(dfs, how="vertical", rechunk=True)
+    return df_concat
+
+
+def _copy_cols_as_df(df: pl.DataFrame, cols: List[str], prefix: str) -> pl.DataFrame:
+    """
+    Explicitly copy columns into a new DataFrame to avoid name collisions.
+    Missing columns are ignored.
+    """
+    cols_exist = [c for c in cols if c in df.columns]
+    data = {f"{prefix}{c}": df[c].to_list() for c in cols_exist}
+    return pl.DataFrame(data)
+
+
+def build_edge_index(
+    *,
+    left_df: pl.DataFrame,
+    left_join_col: str,
+    right_df: pl.DataFrame,
+    right_join_col: str,
+    left_entity_key: str,
+    right_entity_key: str,
+    keep_edge_order_from: str = "left",  # "left" or "right"
+    left_edge_attr: Optional[List[str]] = None,
+    right_edge_attr: Optional[List[str]] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, pl.DataFrame]:
+    """
+    Returns:
+      edge_index: [2, E] long
+      edge_attr:  [E, F] float (F can be 0 -> returns [E,1] placeholder)
+      src_idx:    [E] long
+      dst_idx:    [E] long
+      edges_df:   Polars DF with src_key,dst_key,src_idx,dst_idx (+ optional edge attr columns for debug)
+    """
+
+    left_edge_attr = left_edge_attr or []
+    right_edge_attr = right_edge_attr or []
+
+    # --- 1) node idx space: key -> idx (stable via sort on key) ---
+    left_k2i = (
+        left_df.select(left_entity_key)
+               .drop_nulls()
+               .unique()
+               .sort(left_entity_key)
+               .with_row_index("src_idx")
+               .rename({left_entity_key: "src_key"})
+    )
+
+    right_k2i = (
+        right_df.select(right_entity_key)
+                .drop_nulls()
+                .unique()
+                .sort(right_entity_key)
+                .with_row_index("dst_idx")
+                .rename({right_entity_key: "dst_key"})
+    )
+
+    # --- 2) build minimal copies for join (avoid name collisions) + attach attr by _rid ---
+    if keep_edge_order_from == "left":
+        # base left edge rows: (rid, joined, src_key)
+        L_base = pl.DataFrame({
+            "_rid": list(range(left_df.height)),
+            "joined": left_df[left_join_col].to_list(),
+            "src_key": left_df[left_entity_key].to_list(),
+        }).drop_nulls(["joined", "src_key"])
+
+        # left edge attrs copied by row order, then joined on _rid to match the filtered L_base
+        if left_edge_attr:
+            L_attr = _copy_cols_as_df(left_df, left_edge_attr, prefix="l__").with_row_index("_rid")
+            L = L_base.join(L_attr, on="_rid", how="left")
+        else:
+            L = L_base
+
+        # right side for matching destination keys
+        R = pl.DataFrame({
+            "joined": right_df[right_join_col].to_list(),
+            "dst_key": right_df[right_entity_key].to_list(),
+        }).drop_nulls(["joined", "dst_key"])
+
+        # join and restore order by left _rid
+        J = L.join(R, on="joined", how="inner").sort("_rid")
+
+        # right attrs (node-level-ish) if you insist: map by dst_key later (NOT by rid)
+        # If you truly want right attrs per edge instance, you need them to come from the left/event table.
+        # We'll support right_edge_attr as "dst-node attrs" via dst_key join after k2i mapping.
+        attach_right_by = "dst_key"
+
+    else:
+        # symmetric: keep order from right table
+        R_base = pl.DataFrame({
+            "_rid": list(range(right_df.height)),
+            "joined": right_df[right_join_col].to_list(),
+            "dst_key": right_df[right_entity_key].to_list(),
+        }).drop_nulls(["joined", "dst_key"])
+
+        if right_edge_attr:
+            R_attr = _copy_cols_as_df(right_df, right_edge_attr, prefix="r__").with_row_index("_rid")
+            R = R_base.join(R_attr, on="_rid", how="left")
+        else:
+            R = R_base
+
+        L = pl.DataFrame({
+            "joined": left_df[left_join_col].to_list(),
+            "src_key": left_df[left_entity_key].to_list(),
+        }).drop_nulls(["joined", "src_key"])
+
+        J = R.join(L, on="joined", how="inner").sort("_rid")
+        attach_right_by = None  # already in J if we kept order from right
+
+    if J.height == 0:
+        raise ValueError("Join produced no edges. Check join columns overlap.")
+
+    # --- 3) map keys -> idx ---
+    edges_df = (
+        J.join(left_k2i, on="src_key", how="inner")
+         .join(right_k2i, on="dst_key", how="inner")
+    )
+
+    if edges_df.height == 0:
+        raise ValueError("After mapping keys->idx, edges are empty. Check key domains.")
+
+    # --- 4) build edge_index ---
+    src_idx = torch.tensor(edges_df["src_idx"].to_list(), dtype=torch.long)
+    dst_idx = torch.tensor(edges_df["dst_idx"].to_list(), dtype=torch.long)
+    edge_index = torch.stack([src_idx, dst_idx], dim=0)
+
+    # --- 5) build edge_attr ---
+    # left-side attrs are already in edges_df (prefixed l__)
+    attr_cols = [c for c in edges_df.columns if c.startswith("l__") or c.startswith("r__")]
+
+    # Optional: if keep_edge_order_from=="left" and you want right_edge_attr as dst-node attrs,
+    # join them by dst_key (one dst row per key)
+    if keep_edge_order_from == "left" and right_edge_attr:
+        # Build dst_key -> attrs mapping table (unique by dst_key)
+        Rn = pl.DataFrame({
+            "dst_key": right_df[right_entity_key].to_list(),
+        })
+        Rattrs = _copy_cols_as_df(right_df, right_edge_attr, prefix="r__")
+        Rmap = pl.concat([Rn, Rattrs], how="horizontal").drop_nulls(["dst_key"]).unique(subset=["dst_key"])
+        edges_df = edges_df.join(Rmap, on="dst_key", how="left")
+        attr_cols = [c for c in edges_df.columns if c.startswith("l__") or c.startswith("r__")]
+
+    if len(attr_cols) == 0:
+        edge_attr = torch.ones((edge_index.shape[1], 1), dtype=torch.float)
+    else:
+        # Convert to numeric; non-numeric columns must be preprocessed before here.
+        attr_np = edges_df.select(attr_cols).to_numpy()
+        edge_attr = torch.tensor(attr_np, dtype=torch.float)
+
+    # keep a clean debug view
+    debug_cols = ["src_key", "dst_key", "src_idx", "dst_idx"] + attr_cols
+    edges_df = edges_df.select([c for c in debug_cols if c in edges_df.columns])
+
+    return edge_index, edge_attr, src_idx, dst_idx, edges_df
+
+def split_tables_by_trait(
+    schema: Dict[str, Any],
+    table_dict: Dict[str, pl.DataFrame],
+    *,
+    include_key_cols_in_both: bool = True,
+    strict: bool = False,
+    treat_null_trait_as: Optional[str] = None,  # None | "node" | "edge"
+) -> Dict[str, Tuple[pl.DataFrame, pl.DataFrame]]:
+    """
+    Split each table into (node_df, edge_df) based on schema trait_type.
+
+    Args:
+        schema: dict loaded from YAML. Expected schema["datasets"][table_name]["variables"][col] -> info dict
+        table_dict: {table_name: pl.DataFrame}
+        include_key_cols_in_both: if True, columns with key:true are included in both node_df and edge_df.
+        strict: if True, raise if schema refers to a column missing in the DataFrame.
+        treat_null_trait_as: if trait_type is null/None/missing, optionally treat as "node" or "edge".
+                             If None, those cols are ignored (unless key:true and include_key_cols_in_both).
+
+    Returns:
+        {table_name: (node_df, edge_df)}
+    """
+
+    if "datasets" not in schema:
+        raise KeyError("schema missing top-level 'datasets'")
+
+    out: Dict[str, Tuple[pl.DataFrame, pl.DataFrame]] = {}
+
+    for table_name, df in table_dict.items():
+        if table_name not in schema["datasets"]:
+            if strict:
+                raise KeyError(f"schema missing dataset entry for table {table_name!r}")
+            # still return empty splits with original df columns ignored
+            out[table_name] = (df.head(0), df.head(0))
+            continue
+
+        vars_cfg: Dict[str, Dict[str, Any]] = schema["datasets"][table_name].get("variables", {})
+        if not isinstance(vars_cfg, dict):
+            raise TypeError(f"schema['datasets'][{table_name!r}]['variables'] must be a dict")
+
+        node_cols: List[str] = []
+        edge_cols: List[str] = []
+
+        for col, info in vars_cfg.items():
+            if col not in df.columns:
+                if strict:
+                    raise KeyError(f"Table {table_name!r} missing column {col!r} required by schema")
+                continue
+
+            is_key = bool(info.get("key", False))
+            trait = info.get("trait_type", None)
+
+            if trait is None and treat_null_trait_as is not None:
+                trait = treat_null_trait_as
+
+            # Key columns: usually keep everywhere for join/traceability
+            if is_key and include_key_cols_in_both:
+                if col not in node_cols:
+                    node_cols.append(col)
+                if col not in edge_cols:
+                    edge_cols.append(col)
+                # do not "continue": a key col could still be explicitly node/edge, but we've already included it
+                continue
+
+            if trait == "node":
+                node_cols.append(col)
+            elif trait == "edge":
+                edge_cols.append(col)
+            else:
+                # trait_type is null or unknown: ignore by default
+                pass
+
+        # Make sure we don't duplicate columns
+        node_cols = list(dict.fromkeys(node_cols))
+        edge_cols = list(dict.fromkeys(edge_cols))
+
+        node_df = df.select(node_cols) if node_cols else df.select([])
+        edge_df = df.select(edge_cols) if edge_cols else df.select([])
+
+        out[table_name] = (node_df, edge_df)
+
     return out
 
 
-def _trait_type(meta: Dict[str, Any]) -> Optional[str]:
-    # unify 'trait' and 'trait_type'
-    t = meta.get("trait_type", None)
-    if t is None:
-        t = meta.get("trait", None)
-    return t
-
-
-def _dtype_map(dtype_str: str) -> Any:
-    # You can extend this mapping if your YAML has more types
-    DTYPE_MAP = {
-        "Int64": pl.Int64,
-        "Float64": pl.Float64,
-        "string": pl.Utf8,
-        "datetime64[ns]": pl.Datetime("ns"),
-    }
-    return DTYPE_MAP.get(dtype_str, pl.Utf8)
-
-
-def _is_numeric_polars_dtype(dt: pl.DataType) -> bool:
-    return dt in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64, pl.Float32, pl.Float64)
-
-
-# ----------------------------
-# Returned artifact
-# ----------------------------
-
-@dataclass
-class GraphArtifact:
-    # Polars-side
-    nodes: Dict[str, pl.DataFrame]                       # columns: [entity_key, (name), node_feats...]
-    edges: Dict[Tuple[str, str, str], pl.DataFrame]       # columns: ["src_id","dst_id", edge_feats...]
-    node_entities: Dict[str, List[Any]]                   # node_id -> entity_key (list order)
-    node_id_maps: Dict[str, Dict[Any, int]]               # entity_key -> node_id
-    node_feature_names: Dict[str, List[str]]              # features in x order
-    node_mask_names: Dict[str, List[str]]                 # mask=True feature names
-    edge_feature_names: Dict[Tuple[str, str, str], List[str]]
-    edge_mask_names: Dict[Tuple[str, str, str], List[str]]
-    mappings: Dict[str, Any]
-    schema_datasets: Dict[str, Any]
-
-    # Torch-side
-    pyg: Optional["HeteroData"] = None
-
-
-# ----------------------------
-# GraphBuilder
-# ----------------------------
-
 class GraphBuilder:
-    """
-    Build a heterogeneous graph from:
-      - tables: dict[node_type, pl.DataFrame]
-      - schema_datasets: schema["datasets"][node_type]["variables"][col] includes:
-            dtype, mask, trait/trait_type, (optional) agg
-      - mappings: mapping config includes per node_type:
-            entity_key, name, links{dst_type: {left_on, right_on}}
-    """
+    def __init__(self,yaml):
+        self.yaml = yaml
+        self.build_graph()
+        self.logger = self.setup_logger()
 
-    def __init__(
-        self,
-        *,
-        tables: Dict[str, pl.DataFrame],
-        schema_datasets: Dict[str, Any],
-        mappings: Dict[str, Any],
-        default_numeric_agg: str = "mean",
-    ) -> None:
-        self.tables = tables
-        self.schema_datasets = schema_datasets
-        self.mappings = mappings
-        self.default_numeric_agg = default_numeric_agg
+    def build_graph(self):
+        #----
+        #load tables first
+        #----   
+        tasks = load_table(self.yaml, "tasks")
+        assignments = load_table(self.yaml, "assignments")
+        engineers = load_table(self.yaml, "engineers")
+        districts = load_table(self.yaml, "districts")
+        departments = load_table(self.yaml, "departments")
+        #----
+        #construct each entity attribute by group by thourgh entity key
+        #expect more smart aggregate function instead of first() in the future
+        #----   
+        # ---
+        # split the table into two parts: node features and edge features
+        # ---
+        TABLE_DICT = {
+        "tasks": tasks,
+        "assignments": assignments,
+        "engineers": engineers,
+        "districts": districts,
+        "departments": departments,
+        #"task_statuses": task_statuses,
+        }
+        splits = split_tables_by_trait(self.yaml, TABLE_DICT, include_key_cols_in_both=False)
+        tasks_node, tasks_edge = splits["tasks"]
+        assign_node, assign_edge = splits["assignments"]
+        engineer_node, engineer_edge = splits["engineers"]
+        district_node, district_edge = splits["districts"]
+        department_node, department_edge = splits["departments"]
+        ## 这里是特征字典
+        #TODO: change the placement tensor into real feature tensor after feature engineering
+        feature_dicts = {
+            "tasks": (
+                list(tasks_node.columns),      # node feature columns
+                list(tasks_edge.columns),      # edge feature columns
+            ),
+            "assignments": (
+                list(assign_node.columns),
+                list(assign_edge.columns),
+            ),
+            "engineers": (
+                list(engineer_node.columns),
+                list(engineer_edge.columns),
+            ),
+            "districts": (
+                list(district_node.columns),
+                list(district_edge.columns),
+            ),
+            "departments": (
+                list(department_node.columns),
+                list(department_edge.columns),
+            ),
+        }
+        # ---
+        # feature engineering for each node and edge type
+        # TODO: implement feature engineering functions
+        # ---
 
-        assert isinstance(self.tables, dict) and self.tables, "tables must be a non-empty dict"
-        assert isinstance(self.schema_datasets, dict) and self.schema_datasets, "schema_datasets must be a non-empty dict"
-        assert isinstance(self.mappings, dict) and self.mappings, "mappings must be a dict"
-        for nt, df in self.tables.items():
-            assert isinstance(df, pl.DataFrame), f"tables[{nt}] must be a polars DataFrame, got {type(df)}"
-            _assert_unique_columns(df, where=f"init/tables[{nt}]")
-
-    # ----------------------------
-    # Schema access
-    # ----------------------------
-
-    def _vars_meta(self, node_type: str) -> Dict[str, Dict[str, Any]]:
-        assert node_type in self.schema_datasets, f"node_type={node_type!r} missing in schema_datasets keys={list(self.schema_datasets.keys())}"
-        ds = self.schema_datasets[node_type]
-        assert "variables" in ds, f"schema_datasets[{node_type}] missing 'variables'"
-        return ds["variables"]
-
-    def _entity_key(self, node_type: str) -> str:
-        assert node_type in self.mappings, f"node_type={node_type!r} missing in mappings keys={list(self.mappings.keys())}"
-        ek = self.mappings[node_type].get("entity_key", None)
-        assert isinstance(ek, str) and ek, f"mappings[{node_type}].entity_key must be a non-empty string"
-        return ek
-
-    def _name_col(self, node_type: str) -> Optional[str]:
-        # optional column to display (you used "name" in YAML)
-        if node_type not in self.mappings:
-            return None
-        nc = self.mappings[node_type].get("name", None)
-        if nc is None:
-            return None
-        assert isinstance(nc, str) and nc, f"mappings[{node_type}].name must be a non-empty string if present"
-        return nc
-
-    def _links(self, node_type: str) -> Dict[str, Dict[str, str]]:
-        cfg = self.mappings.get(node_type, {})
-        links = cfg.get("links", {})
-        assert isinstance(links, dict), f"mappings[{node_type}].links must be a dict"
-        # validate structure
-        for dst_type, link in links.items():
-            assert isinstance(link, dict), f"mappings[{node_type}].links[{dst_type}] must be a dict"
-            assert "left_on" in link and "right_on" in link, f"mappings[{node_type}].links[{dst_type}] must have left_on/right_on"
-            assert isinstance(link["left_on"], str) and link["left_on"], f"left_on invalid for {node_type}->{dst_type}"
-            assert isinstance(link["right_on"], str) and link["right_on"], f"right_on invalid for {node_type}->{dst_type}"
-        return links
-
-    # ----------------------------
-    # Node construction
-    # ----------------------------
-
-    def _build_nodes(self, node_type: str) -> Tuple[pl.DataFrame, List[Any], Dict[Any, int], List[str], List[str]]:
-        """
-        Return:
-          node_df: [entity_key, (name), feature...]
-          entities_list: node_id -> entity_key
-          id_map: entity_key -> node_id
-          feat_names: x columns (float only)
-          mask_names: subset of feat_names where mask=True
-        """
-        df = self.tables[node_type]
-        _assert_unique_columns(df, where=f"build_nodes/input:{node_type}")
-
-        entity_key = self._entity_key(node_type)
-        assert entity_key in df.columns, f"[{node_type}] entity_key={entity_key!r} not in df.columns={df.columns}"
-
-        name_col = self._name_col(node_type)
-        if name_col is not None:
-            assert name_col in df.columns, f"[{node_type}] name_col={name_col!r} not in df.columns={df.columns}"
-
-        vars_meta = self._vars_meta(node_type)
-
-        # pick node traits (trait_type == "node")
-        node_trait_cols = []
-        node_mask_cols = []
-        for col, meta in vars_meta.items():
-            t = _trait_type(meta)
-            if t == "node":
-                if col in df.columns:
-                    node_trait_cols.append(col)
-                    if bool(meta.get("mask", False)):
-                        node_mask_cols.append(col)
-
-        # stable, unique select list: entity_key + optional name + node traits
-        raw_select = [entity_key]
-        if name_col and name_col != entity_key:
-            raw_select.append(name_col)
-        raw_select.extend(node_trait_cols)
-
-        select_cols = _dedup_keep_order([c for c in raw_select if c in df.columns])
-
-        assert select_cols.count(entity_key) == 1, f"[{node_type}] entity_key duplicated in select_cols={select_cols}"
-        if name_col:
-            assert select_cols.count(name_col) <= 1, f"[{node_type}] name_col duplicated in select_cols={select_cols}"
-
-        base = df.select(select_cols).filter(pl.col(entity_key).is_not_null())
-        _assert_unique_columns(base, where=f"build_nodes/base:{node_type}")
-
-        # Build aggregations for traits if multiple rows per entity_key
-        # - numeric: default mean (or meta['agg'])
-        # - non-numeric: first non-null
-        agg_exprs = []
-        for col in node_trait_cols:
-            if col == entity_key:
-                continue
-            if name_col and col == name_col:
-                continue
-            if col not in base.columns:
-                continue
-
-            meta = vars_meta.get(col, {})
-            agg = meta.get("agg", None)
-
-            # infer by dtype in base
-            dt = base.schema[col]
-            if _is_numeric_polars_dtype(dt):
-                use_agg = agg or self.default_numeric_agg
-                if use_agg == "mean":
-                    agg_exprs.append(pl.col(col).mean().alias(col))
-                elif use_agg == "sum":
-                    agg_exprs.append(pl.col(col).sum().alias(col))
-                elif use_agg == "max":
-                    agg_exprs.append(pl.col(col).max().alias(col))
-                elif use_agg == "min":
-                    agg_exprs.append(pl.col(col).min().alias(col))
-                elif use_agg == "first":
-                    agg_exprs.append(pl.col(col).drop_nulls().first().alias(col))
-                else:
-                    raise ValueError(f"[{node_type}] unsupported agg={use_agg!r} for numeric col={col}")
-            else:
-                # for strings/datetimes/etc: stable default: first non-null
-                agg_exprs.append(pl.col(col).drop_nulls().first().alias(col))
-
-        # name column aggregation (if present)
-        if name_col and name_col != entity_key:
-            # keep first non-null name per entity
-            agg_exprs.append(pl.col(name_col).drop_nulls().first().alias(name_col))
-
-        if agg_exprs:
-            grouped = base.group_by(entity_key).agg(agg_exprs)
-        else:
-            grouped = base.unique(subset=[entity_key])
-
-        # ensure entity_key exists
-        assert entity_key in grouped.columns, f"[{node_type}] grouped lost entity_key={entity_key}. cols={grouped.columns}"
-        _assert_unique_columns(grouped, where=f"build_nodes/grouped:{node_type}")
-
-        # Create node id order and id_map
-        # Keep stable ordering by sorting entity_key if sortable; otherwise keep Polars order.
-        # Polars entity_key may be numeric/string mixed; safest: keep order as produced.
-        entities = grouped[entity_key].to_list()
-        assert len(entities) > 0, f"[{node_type}] no entities after grouping"
-        id_map = {}
-        for i, ek in enumerate(entities):
-            # disallow duplicates
-            assert ek not in id_map, f"[{node_type}] duplicate entity_key value after grouping: {ek!r}"
-            id_map[ek] = i
-
-        # Determine numeric feature columns for x:
-        # Only include numeric node traits (float/int) excluding entity_key/name
-        feat_names = []
-        mask_names = []
-        for col in node_trait_cols:
-            if col == entity_key:
-                continue
-            if name_col and col == name_col:
-                continue
-            if col not in grouped.columns:
-                continue
-            dt = grouped.schema[col]
-            if _is_numeric_polars_dtype(dt):
-                feat_names.append(col)
-                if col in node_mask_cols:
-                    mask_names.append(col)
-
-        node_df = grouped  # includes entity_key + maybe name + all aggregated traits
-        return node_df, entities, id_map, feat_names, mask_names
-
-    # ----------------------------
-    # Edge construction (mapping-driven, robust)
-    # ----------------------------
-
-    def _build_edges(
-        self,
-        *,
-        src_type: str,
-        dst_type: str,
-        left_on: str,
-        right_on: str,
-        src_id_map: Dict[Any, int],
-        dst_id_map: Dict[Any, int],
-    ) -> Tuple[pl.DataFrame, List[str], List[str]]:
-        """
-        Build edges src_type -> dst_type based on mapping join columns.
-
-        We build a "pair table" of (src_entity, dst_entity) via joining only needed columns.
-        Then we map entities to node ids using id_map dicts.
-
-        Important: join columns may equal entity_key on either side.
-        We do NOT attempt to keep duplicate physical column names. We rename columns
-        into internal names: __src_ent, __dst_ent, __src_key, __dst_key.
-
-        Returns:
-          edge_df columns: ["src_id","dst_id", edge_feat...]
-          edge_feat_names numeric edge features (currently empty by default)
-          edge_mask_names mask=True edge feature names (currently empty by default)
-        """
-        src_df = self.tables[src_type]
-        dst_df = self.tables[dst_type]
-        _assert_unique_columns(src_df, where=f"build_edges/src_input:{src_type}")
-        _assert_unique_columns(dst_df, where=f"build_edges/dst_input:{dst_type}")
-
-        src_entity_key = self._entity_key(src_type)
-        dst_entity_key = self._entity_key(dst_type)
-
-        assert left_on in src_df.columns, f"[edge {src_type}->{dst_type}] left_on={left_on!r} not in src columns={src_df.columns}"
-        assert right_on in dst_df.columns, f"[edge {src_type}->{dst_type}] right_on={right_on!r} not in dst columns={dst_df.columns}"
-        assert src_entity_key in src_df.columns, f"[edge {src_type}->{dst_type}] src_entity_key={src_entity_key!r} not in src columns={src_df.columns}"
-        assert dst_entity_key in dst_df.columns, f"[edge {src_type}->{dst_type}] dst_entity_key={dst_entity_key!r} not in dst columns={dst_df.columns}"
-
-        # Build minimal projection for each side, carefully:
-        # We need: (src_entity_key, left_on) from src table
-        #          (dst_entity_key, right_on) from dst table
-        # But if src_entity_key == left_on, we must keep both semantics without duplicate names.
-        src_select = []
-        if src_entity_key == left_on:
-            # same column supplies both entity and join key
-            src_select = [
-                pl.col(src_entity_key).alias("__src_ent"),
-                pl.col(left_on).alias("__src_key"),
-            ]
-        else:
-            src_select = [
-                pl.col(src_entity_key).alias("__src_ent"),
-                pl.col(left_on).alias("__src_key"),
-            ]
-
-        dst_select = []
-        if dst_entity_key == right_on:
-            dst_select = [
-                pl.col(dst_entity_key).alias("__dst_ent"),
-                pl.col(right_on).alias("__dst_key"),
-            ]
-        else:
-            dst_select = [
-                pl.col(dst_entity_key).alias("__dst_ent"),
-                pl.col(right_on).alias("__dst_key"),
-            ]
-
-        src_proj = src_df.select(src_select).filter(
-            pl.col("__src_ent").is_not_null() & pl.col("__src_key").is_not_null()
-        )
-        dst_proj = dst_df.select(dst_select).filter(
-            pl.col("__dst_ent").is_not_null() & pl.col("__dst_key").is_not_null()
-        )
-
-        _assert_unique_columns(src_proj, where=f"build_edges/src_proj:{src_type}")
-        _assert_unique_columns(dst_proj, where=f"build_edges/dst_proj:{dst_type}")
-
-        # Now the join is ALWAYS on __src_key == __dst_key
-        joined = src_proj.join(dst_proj, left_on="__src_key", right_on="__dst_key", how="inner")
-        _assert_unique_columns(joined, where=f"build_edges/joined:{src_type}->{dst_type}")
-
-        # Convert entities to node ids using mapping dicts.
-        # We keep only pairs that exist in node maps (should, but guard anyway).
-        src_ents = joined["__src_ent"].to_list()
-        dst_ents = joined["__dst_ent"].to_list()
-        assert len(src_ents) == len(dst_ents), "internal error: join produced mismatched lengths"
-
-        src_ids: List[int] = []
-        dst_ids: List[int] = []
-        dropped = 0
-        for se, de in zip(src_ents, dst_ents):
-            si = src_id_map.get(se, None)
-            di = dst_id_map.get(de, None)
-            if si is None or di is None:
-                dropped += 1
-                continue
-            src_ids.append(si)
-            dst_ids.append(di)
-
-        # if everything dropped, it's usually a mapping/key mismatch
-        assert len(src_ids) > 0, (
-            f"[edge {src_type}->{dst_type}] no edges produced after id mapping. "
-            f"dropped={dropped}. check entity_key values/types and mappings left_on/right_on."
-        )
-
-        edge_df = pl.DataFrame({"src_id": src_ids, "dst_id": dst_ids})
-
-        # Edge traits:
-        # Your YAML idea: "trait_type == edge" columns belong to edges.
-        # BUT: those columns live in *tables*, not in links config. Attaching them is ambiguous.
-        # Here we do the minimal correct thing: build topology first.
-        # You can extend by defining per-link edge_attr_source in YAML later.
-        edge_feat_names: List[str] = []
-        edge_mask_names: List[str] = []
-        return edge_df, edge_feat_names, edge_mask_names
-
-    # ----------------------------
-    # Build full artifact
-    # ----------------------------
-
-    def build(self) -> GraphArtifact:
-        # 1) Build nodes for every table that has mapping info
-        nodes: Dict[str, pl.DataFrame] = {}
-        node_entities: Dict[str, List[Any]] = {}
-        node_id_maps: Dict[str, Dict[Any, int]] = {}
-        node_feat_names: Dict[str, List[str]] = {}
-        node_mask_names: Dict[str, List[str]] = {}
-
-        for node_type in self.tables.keys():
-            # Only build nodes if it exists in mappings (otherwise it's "unused")
-            if node_type not in self.mappings:
-                continue
-
-            node_df, entities, id_map, feat_names, mask_names = self._build_nodes(node_type)
-
-            nodes[node_type] = node_df
-            node_entities[node_type] = entities
-            node_id_maps[node_type] = id_map
-            node_feat_names[node_type] = feat_names
-            node_mask_names[node_type] = mask_names
-
-            # asserts for sanity
-            assert len(entities) == node_df.height, f"[{node_type}] entities length != node_df height"
-            assert all(isinstance(i, int) for i in id_map.values()), f"[{node_type}] id_map values must be ints"
-            # no duplicate entity keys
-            assert len(set(entities)) == len(entities), f"[{node_type}] duplicate entity keys after build_nodes"
-
-        assert nodes, "no nodes built (check mappings keys vs tables keys)"
-
-        # 2) Build edges according to mappings.links
-        edges: Dict[Tuple[str, str, str], pl.DataFrame] = {}
-        edge_feat_names: Dict[Tuple[str, str, str], List[str]] = {}
-        edge_mask_names: Dict[Tuple[str, str, str], List[str]] = {}
-
-        for src_type in nodes.keys():
-            links = self._links(src_type)
-            for dst_type, link_cfg in links.items():
-                # We only build if dst nodes exist
-                if dst_type not in nodes:
-                    continue
-
-                left_on = link_cfg["left_on"]
-                right_on = link_cfg["right_on"]
-
-                # Relation name: deterministic
-                rel = f"{src_type}__to__{dst_type}"
-                etype = (src_type, rel, dst_type)
-
-                edge_df, ef, em = self._build_edges(
-                    src_type=src_type,
-                    dst_type=dst_type,
-                    left_on=left_on,
-                    right_on=right_on,
-                    src_id_map=node_id_maps[src_type],
-                    dst_id_map=node_id_maps[dst_type],
-                )
-
-                edges[etype] = edge_df
-                edge_feat_names[etype] = ef
-                edge_mask_names[etype] = em
-
-                # more asserts
-                assert "src_id" in edge_df.columns and "dst_id" in edge_df.columns, f"[{etype}] edge_df missing src_id/dst_id"
-                assert edge_df.height > 0, f"[{etype}] empty edge_df (should have been caught earlier)"
-
-        art = GraphArtifact(
-            nodes=nodes,
-            edges=edges,
-            node_entities=node_entities,
-            node_id_maps=node_id_maps,
-            node_feature_names=node_feat_names,
-            node_mask_names=node_mask_names,
-            edge_feature_names=edge_feat_names,
-            edge_mask_names=edge_mask_names,
-            mappings=self.mappings,
-            schema_datasets=self.schema_datasets,
-        )
-        return art
-
-    # ----------------------------
-    # Torch / PyG conversion (reversible at entity_key level)
-    # ----------------------------
-
-    def to_pyg(self, art: GraphArtifact) -> GraphArtifact:
-        assert torch is not None and HeteroData is not None, "torch_geometric not available in this environment"
-        data = HeteroData()
+        #---
+        # construct hetero graph
+        #---
+        self.graph = HeteroData()
 
         # nodes
-        for node_type, node_df in art.nodes.items():
-            feat_names = art.node_feature_names.get(node_type, [])
-            # build x (N, F) float32
-            if feat_names:
-                x_df = node_df.select(feat_names)
-                # fill nulls with 0.0 for numeric
-                x_df = x_df.with_columns([pl.col(c).fill_null(0.0) for c in feat_names])
-                x = torch.tensor(x_df.to_numpy(), dtype=torch.float32)
-            else:
-                x = torch.empty((node_df.height, 0), dtype=torch.float32)
-
-            data[node_type].x = x
-            data[node_type].x_names = feat_names
-            data[node_type].mask_names = art.node_mask_names.get(node_type, [])
-
-            # store entity_key list for reversibility
-            entity_key = self._entity_key(node_type)
-            data[node_type].entity_key_name = entity_key
-            data[node_type].entity_keys = art.node_entities[node_type]  # python list
-
-            # optional name col
-            name_col = self._name_col(node_type)
-            if name_col and name_col in node_df.columns:
-                # create parallel python list (not tensor)
-                data[node_type].name_col = name_col
-                data[node_type].names = node_df[name_col].to_list()
+        for table_name, df in TABLE_DICT.items():
+            self.graph[table_name].x = TABLE_DICT[table_name][feature_dicts[table_name][0]]
 
         # edges
-        for etype, edge_df in art.edges.items():
-            src_type, rel, dst_type = etype
-            src = torch.tensor(edge_df["src_id"].to_list(), dtype=torch.long)
-            dst = torch.tensor(edge_df["dst_id"].to_list(), dtype=torch.long)
-            edge_index = torch.stack([src, dst], dim=0)
-            data[etype].edge_index = edge_index
-            data[etype].edge_attr_names = art.edge_feature_names.get(etype, [])
-            data[etype].mask_names = art.edge_mask_names.get(etype, [])
-            # edge_attr currently empty by default
-            data[etype].edge_attr = torch.empty((edge_df.height, 0), dtype=torch.float32)
+        for src_table, metadata in self.yaml["mappings"].items():
+            if "links" not in metadata or metadata["links"] is None:
+                continue
 
-        art.pyg = data
-        return art
+            for dst_table, link_info in metadata["links"].items():
+                left_on = link_info["left_on"]
+                right_on = link_info["right_on"]
+                edge_type = link_info.get("edge_type", "relates_to")
 
-    def from_pyg_nodes(self, art: GraphArtifact, *, node_type: str) -> pl.DataFrame:
-        assert art.pyg is not None, "artifact has no pyg graph; call to_pyg first"
-        data = art.pyg
-        assert node_type in data.node_types, f"node_type={node_type} not in pyg node_types={data.node_types}"
+                edge_index, edge_attr, src_idx, dst_idx, edges_df = build_edge_index(
+                    left_df=TABLE_DICT[src_table],
+                    left_join_col=left_on,
+                    right_df=TABLE_DICT[dst_table],
+                    right_join_col=right_on,
+                    left_entity_key=self.yaml["mappings"][src_table]["entity_key"],
+                    right_entity_key=self.yaml["mappings"][dst_table]["entity_key"],
+                    left_edge_attr=feature_dicts[src_table][1],
+                    right_edge_attr=feature_dicts[dst_table][1],
+                )
 
-        entity_keys = data[node_type].entity_keys
-        x = data[node_type].x
-        x_names = getattr(data[node_type], "x_names", [])
+                rel = (src_table, edge_type, dst_table)
+                self.graph[rel].edge_index = edge_index
 
-        # x might be empty
-        if x.numel() == 0 or len(x_names) == 0:
-            return pl.DataFrame({data[node_type].entity_key_name: entity_keys})
+                # ✅ edge_attr: per-edge, gathered by src_idx/dst_idx
+                src_edge_feat = feature_dicts[src_table][1].float()  # [N_src, F_src_edge]
+                dst_edge_feat = feature_dicts[dst_table][1].float()  # [N_dst, F_dst_edge]
 
-        # convert to python lists
-        mat = x.detach().cpu().numpy()
-        out = {data[node_type].entity_key_name: entity_keys}
-        for j, name in enumerate(x_names):
-            out[name] = mat[:, j].tolist()
-        return pl.DataFrame(out)
+                # 若某一侧没有 edge 特征（shape[1]==0），就只用另一侧
+                parts = []
+                if src_edge_feat.numel() > 0 and src_edge_feat.shape[1] > 0:
+                    parts.append(src_edge_feat[src_idx])  # [E, F_src_edge]
+                if dst_edge_feat.numel() > 0 and dst_edge_feat.shape[1] > 0:
+                    parts.append(dst_edge_feat[dst_idx])  # [E, F_dst_edge]
 
-    def from_pyg_edges(self, art: GraphArtifact, *, etype: Tuple[str, str, str]) -> pl.DataFrame:
-        assert art.pyg is not None, "artifact has no pyg graph; call to_pyg first"
-        data = art.pyg
-        assert etype in data.edge_types, f"etype={etype} not in pyg edge_types={data.edge_types}"
+                if len(parts) == 0:
+                    # 占位，至少保证 edge_attr 存在且行数对齐
+                    self.graph[rel].edge_attr = torch.ones((edge_index.shape[1], 1), dtype=torch.float)
+                else:
+                    self.graph[rel].edge_attr = torch.cat(parts, dim=1)  # [E, F_total]
 
-        src_type, _, dst_type = etype
-        edge_index = data[etype].edge_index.detach().cpu().numpy()
+                # reverse
+                rev_rel = (dst_table, f"rev_{edge_type}", src_table)
+                self.graph[rev_rel].edge_index = edge_index.flip(0)
+                self.graph[rev_rel].edge_attr = self.graph[rel].edge_attr  # 同序，直接复用
 
-        src_ids = edge_index[0].tolist()
-        dst_ids = edge_index[1].tolist()
-
-        src_keys = data[src_type].entity_keys
-        dst_keys = data[dst_type].entity_keys
-
-        # map node_id -> entity_key using stored lists
-        src_ek = [src_keys[i] for i in src_ids]
-        dst_ek = [dst_keys[i] for i in dst_ids]
-
-        return pl.DataFrame({"src_entity": src_ek, "dst_entity": dst_ek})
+        print(self.graph)
 
 
-# ----------------------------
-# Demo test (synthetic)
-# ----------------------------
 
-def _demo_test() -> None:
-    # Minimal synthetic tables that mimic your mapping patterns.
 
-    tasks = pl.DataFrame({
-        "W6KEY": [1, 1, 2, 3],
-        "STATUS": [10, 10, 11, 10],
-        "DURATION": [5.0, 7.0, 3.0, None],  # node trait? (you put DURATION as edge in tasks, but we only use node traits here)
-        "PRIORITY": [2, 2, 1, 3],
-    })
+        pass
 
-    task_statuses = pl.DataFrame({
-        "W6KEY": [10, 11],
-        "NAME": ["Open", "Closed"],
-    })
+    def visualize_node(self,node_type,node_id):
+        pass
 
-    engineers = pl.DataFrame({
-        "NAME": ["alice", "bob", "carl"],
-        "EFFICIENCY": [0.9, 0.8, 0.7],
-        "ACTIVE": [1, 1, 0],
-    })
-
-    assignments = pl.DataFrame({
-        "W6KEY": [100, 101, 102],
-        "TASK": [1, 2, 3],
-        "ASSIGNEDENGINEERS": ["alice", "bob", "alice"],
-        "DURATION": [1.5, 2.0, 3.0],
-    })
-
-    schema_datasets = {
-        "tasks": {
-            "variables": {
-                "W6KEY": {"dtype": "Int64", "mask": False, "trait_type": "node"},
-                "STATUS": {"dtype": "Int64", "mask": False, "trait_type": "node"},
-                "PRIORITY": {"dtype": "Int64", "mask": False, "trait_type": "node"},
-                # DURATION not used as node trait in this demo
-            }
-        },
-        "task_statuses": {
-            "variables": {
-                "W6KEY": {"dtype": "Int64", "mask": False, "trait_type": "node"},
-                "NAME": {"dtype": "string", "mask": False, "trait_type": "node"},
-            }
-        },
-        "engineers": {
-            "variables": {
-                "NAME": {"dtype": "string", "mask": False, "trait_type": "node"},
-                "EFFICIENCY": {"dtype": "Float64", "mask": False, "trait_type": "node"},
-                "ACTIVE": {"dtype": "Int64", "mask": False, "trait_type": "node"},
-            }
-        },
-        "assignments": {
-            "variables": {
-                "W6KEY": {"dtype": "Int64", "mask": False, "trait": "node"},
-                "TASK": {"dtype": "Int64", "mask": False, "trait": None},
-                "ASSIGNEDENGINEERS": {"dtype": "string", "mask": False, "trait": None},
-                "DURATION": {"dtype": "Float64", "mask": False, "trait": "node"},
-            }
-        },
-    }
-
-    mappings = {
-        "tasks": {
-            "entity_key": "W6KEY",
-            "name": "W6KEY",
-            "links": {
-                "task_statuses": {"left_on": "STATUS", "right_on": "W6KEY"},
-                "assignments": {"left_on": "W6KEY", "right_on": "TASK"},
-            },
-        },
-        "task_statuses": {
-            "entity_key": "W6KEY",
-            "name": "NAME",
-            "links": {
-                "tasks": {"left_on": "W6KEY", "right_on": "STATUS"},
-            },
-        },
-        "engineers": {
-            "entity_key": "NAME",
-            "name": "NAME",  # entity_key == name (this is where you blew up before)
-            "links": {
-                "assignments": {"left_on": "NAME", "right_on": "ASSIGNEDENGINEERS"},
-            },
-        },
-        "assignments": {
-            "entity_key": "W6KEY",
-            "name": "W6KEY",
-            "links": {
-                "tasks": {"left_on": "TASK", "right_on": "W6KEY"},
-                "engineers": {"left_on": "ASSIGNEDENGINEERS", "right_on": "NAME"},
-            },
-        },
-    }
-
-    tables = {
-        "tasks": tasks,
-        "task_statuses": task_statuses,
-        "engineers": engineers,
-        "assignments": assignments,
-    }
-
-    gb = GraphBuilder(
-        tables=tables,
-        schema_datasets=schema_datasets,
-        mappings=mappings,
-        default_numeric_agg="mean",
-    )
-
-    art = gb.build()
-
-    # Assertions to show what we built
-    assert "tasks" in art.nodes and art.nodes["tasks"].height == 3, "tasks should have 3 unique W6KEY nodes"
-    assert "engineers" in art.nodes and art.nodes["engineers"].height == 3, "engineers should have 3 NAME nodes"
-    assert any(et[0] == "tasks" and et[2] == "assignments" for et in art.edges.keys()), "tasks->assignments edges missing"
-    assert any(et[0] == "assignments" and et[2] == "engineers" for et in art.edges.keys()), "assignments->engineers edges missing"
-
-    print("Built nodes:", {k: v.shape for k, v in art.nodes.items()})
-    print("Built edges:", {k: v.shape for k, v in art.edges.items()})
-
-    # Optional torch conversion
-    if torch is not None and HeteroData is not None:
-        art = gb.to_pyg(art)
-        # reverse back example
-        df_back = gb.from_pyg_nodes(art, node_type="engineers")
-        print("Back from pyg (engineers nodes):")
-        print(df_back)
-
-        # pick an edge type and reverse
-        some_etype = next(iter(art.edges.keys()))
-        eback = gb.from_pyg_edges(art, etype=some_etype)
-        print("Back from pyg (one edge type):", some_etype)
-        print(eback)
+    def setup_logger(self):
+        logger = Logger(__name__)
+        return logger
+    
+    def visualize_graph(self):
+        pass
 
 
 if __name__ == "__main__":
-    _demo_test()
+    with open("configs/graph.yaml", "r") as f:
+        schema = yaml.safe_load(f)
+    graph = GraphBuilder(yaml=schema)
+
+    

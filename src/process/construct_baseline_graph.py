@@ -515,13 +515,13 @@ if __name__ == "__main__":
 
 
     edge_index= build_edge_index(
-            left_df=tasks,
-    left_join_col=schema["mappings"]["tasks"]["links"]["districts"]["left_on"],   # e.g. "DISTRICT"
-    right_df=districts,
-    right_join_col=schema["mappings"]["tasks"]["links"]["districts"]["right_on"], # e.g. "W6KEY"
-    left_entity_key=schema["mappings"]["tasks"]["entity_key"],                    # e.g. "W6KEY"
-    right_entity_key=schema["mappings"]["districts"]["entity_key"],               # e.g. "W6KEY"
-)
+        left_df=tasks,
+        left_join_col=schema["mappings"]["tasks"]["links"]["districts"]["left_on"],   # e.g. "DISTRICT"
+        right_df=districts,
+        right_join_col=schema["mappings"]["tasks"]["links"]["districts"]["right_on"], # e.g. "W6KEY"
+        left_entity_key=schema["mappings"]["tasks"]["entity_key"],                    # e.g. "W6KEY"
+        right_entity_key=schema["mappings"]["districts"]["entity_key"],               # e.g. "W6KEY"
+    )
     table_dict = {
         "tasks": tasks,
         "assignments": assignments,
@@ -541,6 +541,26 @@ if __name__ == "__main__":
     data["district"].x = torch.ones((districts.shape[0], districts.shape[1]), dtype=torch.float)
     data[("task", "belongs_to", "district")].edge_index = edge_index
     print("debug 3")
+
+    import torch.nn as nn
+    from torch_geometric.nn import SAGEConv, to_hetero
+
+    class GNN(nn.Module):
+        def __init__(self, hidden=16):
+            super().__init__()
+            self.conv1 = SAGEConv((-1, -1), hidden)
+
+        def forward(self, x, edge_index):
+            return self.conv1(x, edge_index)
+
+    # base model for one relation type
+    base = GNN(hidden=16)
+    model = to_hetero(base, data.metadata(), aggr="sum")
+
+    out = model(data.x_dict, data.edge_index_dict)
+    print({k: v.shape for k, v in out.items()})
+
+
 
 
 
