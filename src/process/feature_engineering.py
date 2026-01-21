@@ -108,13 +108,20 @@ def build_feature_table(
     """
     df = df.clone()
 
-    # 1) numeric columns: cast + rename with prefix
-    numeric_cols_exist = [c for c in numeric_cols if c in df.columns]
-    num_renames = {c: f"{prefix}_{c}" for c in numeric_cols_exist}
+    # 0) Rename all original columns with prefix
+    rename_map = {c: f"{prefix}_{c}" for c in df.columns}
+    df = df.rename(rename_map)
 
+    # Update column names for downstream steps
+    key_col_prefixed = [rename_map[c] for c in key_col if c in rename_map]
+    category_cols_prefixed = [rename_map[c] for c in category_cols if c in rename_map]
+    numeric_cols_prefixed = [rename_map[c] for c in numeric_cols if c in rename_map]
+    time_cols_prefixed = [rename_map[c] for c in time_cols if c in rename_map]
+
+    # 1) numeric columns: cast + rename with prefix
     num_exprs = []
-    for c in numeric_cols_exist:
-        num_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(num_renames[c]))
+    for c in numeric_cols_prefixed:
+        num_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(c))
     if num_exprs:
         df = df.with_columns(num_exprs)
 
