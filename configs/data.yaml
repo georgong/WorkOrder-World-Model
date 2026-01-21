@@ -1,5 +1,5 @@
 datasets:
-  w6assignments:
+  w6assignments: &W6ASSIGNMENTS
     file: data/raw/W6ASSIGNMENTS.csv
     variables:
       ASSIGNEDENGINEERS:
@@ -80,7 +80,7 @@ datasets:
         - null
         - null
       TASK:
-        dtype: Float64
+        dtype: Int64
         key: false
         mask: false
         outlier:
@@ -121,7 +121,9 @@ datasets:
         outlier:
         - null
         - null
-  w6department:
+  assignments: *W6ASSIGNMENTS
+
+  w6department: 
     file: data/raw/W6DEPARTMENT.csv
     variables:
       NAME:
@@ -145,7 +147,7 @@ datasets:
         outlier:
         - null
         - null
-  w6districts:
+  w6districts: &W6DISTRICTS
     file: data/raw/W6DISTRICTS.csv
     variables:
       CITY:
@@ -246,7 +248,9 @@ datasets:
         outlier:
         - null
         - null
-  w6engineers:
+  districts: *W6DISTRICTS
+
+  w6engineers: &W6ENGINEERS
     file: data/raw/W6ENGINEERS.csv
     variables:
       ACTIVE:
@@ -529,7 +533,9 @@ datasets:
         outlier:
         - -21588.0
         - 51226.0
-  w6equipment:
+  engineers: *W6ENGINEERS
+    
+  w6equipment: 
     file: data/raw/W6EQUIPMENT.csv
     variables:
       ACTIONCD:
@@ -1137,7 +1143,7 @@ datasets:
         outlier:
         - null
         - null
-  w6tasks:
+  w6tasks: &W6TASKS
     file: data/raw/W6TASKS.csv
     variables:
       AMOPTOUT:
@@ -2050,6 +2056,8 @@ datasets:
         outlier:
         - null
         - null
+  tasks: *W6TASKS
+
   w6task_statuses:
     file: data/raw/W6TASK_STATUSES.csv
     variables:
@@ -2277,3 +2285,23 @@ mappings:
         left_on: W6KEY
         right_on: TASKTYPE
 
+  # # Edges: tasks -> assignments (if assignments has TASK that matches tasks W6KEY or CALLID)
+  # tasks_assignments:
+  #   left: tasks
+  #   right: assignments
+  #   left_on: W6KEY
+  #   right_on: TASK
+
+  # # Edges: assignments -> engineers
+  # assignments_engineers:
+  #   left: assignments
+  #   right: engineers
+  #   left_on: ASSIGNEDENGINEERS
+  #   right_on: W6KEY
+
+  # # Edges: tasks -> districts
+  # tasks_districts:
+  #   left: tasks
+  #   right: districts
+  #   left_on: DISTRICT
+  #   right_on: W6KEY

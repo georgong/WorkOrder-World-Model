@@ -8,6 +8,20 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import numpy as np
 
+from src.process.feature_engineering import (
+    process_task_feature, 
+    process_assignment_feature,
+    process_engineer_feature,
+    process_districts_feature,
+    clean_feat_by_keys,
+)
+from src.process.feature_schema import (
+    task_schema,
+    engineer_schema,
+    assignment_schema,
+    district_schema,
+)
+
 DTYPE_MAP = {
     "Int64": pl.Int64,
     "Float64": pl.Float64,
@@ -439,72 +453,110 @@ def split_tables_by_trait(
 
 
 if __name__ == "__main__":
+    # How to run
+    # python -m src.process.construct_baseline_graph
     import yaml
 
     # Example usage
     with open("configs/graph.yaml", "r") as f:
         schema = yaml.safe_load(f)
 
-    tasks = load_table(schema, "tasks")
-    assignments = load_table(schema, "assignments")
-    engineers = load_table(schema, "engineers")
-    districts = load_table(schema, "districts")
-    departments = load_table(schema, "departments")
+    raw_tasks = load_table(schema, "tasks")
+    raw_assignments = load_table(schema, "assignments")
+    raw_engineers = load_table(schema, "engineers")
+    raw_districts = load_table(schema, "districts")
+    raw_departments = load_table(schema, "departments")
+    # print(raw_tasks.head())
+    # print(raw_assignments.head())
+    # print(raw_engineers.head())
+    # print(raw_districts.head())
+    # print(raw_departments.head())
+
+    tasks = process_task_feature(raw_tasks, task_schema)
+    tasks = clean_feat_by_keys(
+        tasks,
+        key_cols=task_schema.key_cols,
+        primary_key="W6KEY",
+    )
+    
+    assignments = process_assignment_feature(raw_assignments, assignment_schema)
+    assignments = clean_feat_by_keys(
+        assignments,
+        key_cols=assignment_schema.key_cols,
+        primary_key="TASK",
+    )
+    
+    engineers = process_engineer_feature(raw_engineers, engineer_schema)
+    engineers = clean_feat_by_keys(
+        engineers,
+        key_cols=engineer_schema.key_cols,
+        primary_key="NAME",
+    )
+    
+    districts = process_districts_feature(raw_districts, district_schema)
+    districts = clean_feat_by_keys(
+        districts,
+        key_cols=district_schema.key_cols,
+        primary_key="W6KEY",
+    )
+    
+    departments = raw_departments
+
     print(tasks.head())
     print(assignments.head())
     print(engineers.head())
     print(districts.head())
     print(departments.head())
 
-    data = HeteroData()
-    data['task'] = tasks
-    data['assignment'] = assignments
-    data['engineer'] = engineers
-    data['district'] = districts
-    data['department'] = departments
+#     data = HeteroData()
+#     data['task'] = tasks
+#     data['assignment'] = assignments
+#     data['engineer'] = engineers
+#     data['district'] = districts
+#     data['department'] = departments
 
-    data = HeteroData()
-    data["task"]
+#     data = HeteroData()
+#     data["task"]
      
-    print("debug")
+#     print("debug")
 
-    print("debug   ")
+#     print("debug   ")
 
 
-    tasks = (
-    tasks
-    .group_by(schema["mappings"]["tasks"]["entity_key"])
-    .agg(pl.all().first())
-    .sort(schema["mappings"]["tasks"]["entity_key"])
-    )
+#     tasks = (
+#     tasks
+#     .group_by(schema["mappings"]["tasks"]["entity_key"])
+#     .agg(pl.all().first())
+#     .sort(schema["mappings"]["tasks"]["entity_key"])
+#     )
 
-    assignments = (
-        assignments
-        .group_by(schema["mappings"]["assignments"]["entity_key"])
-        .agg(pl.all().first())
-        .sort(schema["mappings"]["assignments"]["entity_key"])
-    )
+#     assignments = (
+#         assignments
+#         .group_by(schema["mappings"]["assignments"]["entity_key"])
+#         .agg(pl.all().first())
+#         .sort(schema["mappings"]["assignments"]["entity_key"])
+#     )
 
-    engineers = (
-        engineers
-        .group_by(schema["mappings"]["engineers"]["entity_key"])
-        .agg(pl.all().first())
-        .sort(schema["mappings"]["engineers"]["entity_key"])
-    )
+#     engineers = (
+#         engineers
+#         .group_by(schema["mappings"]["engineers"]["entity_key"])
+#         .agg(pl.all().first())
+#         .sort(schema["mappings"]["engineers"]["entity_key"])
+#     )
 
-    districts = (
-        districts
-        .group_by(schema["mappings"]["districts"]["entity_key"])
-        .agg(pl.all().first())
-        .sort(schema["mappings"]["districts"]["entity_key"])
-    )
+#     districts = (
+#         districts
+#         .group_by(schema["mappings"]["districts"]["entity_key"])
+#         .agg(pl.all().first())
+#         .sort(schema["mappings"]["districts"]["entity_key"])
+#     )
 
-    departments = (
-        departments
-        .group_by(schema["mappings"]["departments"]["entity_key"])
-        .agg(pl.all().first())
-        .sort(schema["mappings"]["departments"]["entity_key"])
-    )
+#     departments = (
+#         departments
+#         .group_by(schema["mappings"]["departments"]["entity_key"])
+#         .agg(pl.all().first())
+#         .sort(schema["mappings"]["departments"]["entity_key"])
+#     )
 
     
     

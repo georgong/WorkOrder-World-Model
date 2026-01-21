@@ -39,7 +39,7 @@ datasets:
         trait_type: node
 
       Z_ASSIGNMENTKEY_CHAR:
-        dtype: Float64
+        dtype: Int64
         key: true
         mask: false
         trait_type: node

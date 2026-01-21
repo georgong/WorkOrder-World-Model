@@ -177,23 +177,35 @@ def preprocess_dfs(
     ----
     df_concat : pl.DataFrame
     '''
-    assert df_type in ["w6tasks", "w6assignments", "w6engineers", "w6districts"], \
+    assert df_type in ["tasks", "assignments", "engineers", "districts"], \
         "type must be one of 'tasks', 'assignments', 'engineers', 'districts'"
 
-    if df_type == "w6tasks":
+    if df_type == "tasks":
         type_dir = "W6TASKS"
-    elif df_type == "w6assignments":
+    elif df_type == "assignments":
         type_dir = "W6ASSIGNMENTS"
-    elif df_type == "w6engineers":
+    elif df_type == "engineers":
         type_dir = "W6ENGINEERS"
-    elif df_type == "w6districts":
+    elif df_type == "districts":
         type_dir = "W6DISTRICTS"
     else:
         raise ValueError(f"Unknown df_type={df_type}")
 
     data_dir = Path("data/raw")
+    # Prefer shards if exist (W6TASKS-*.csv), otherwise fall back to merged file (W6TASKS.csv)
     files = sorted(data_dir.glob(f"{type_dir}-*.csv"))
+    if not files:
+        single = data_dir / f"{type_dir}.csv"
+        if single.exists():
+            files = [single]
+
     print(files)
+
+    if not files:
+        raise RuntimeError(
+            f"No input files found for {df_type!r}. Expected either "
+            f"{data_dir}/{type_dir}-*.csv or {data_dir}/{type_dir}.csv"
+        )
 
     DTYPE_MAP = {
         "Int64": pl.Int64,
@@ -223,7 +235,7 @@ def preprocess_dfs(
         )
         dfs.append(df)
 
-    df_concat = pl.concat(dfs, how="vertical")
+    df_concat = pl.concat(dfs, how="diagonal")
     print(df_concat)
 
     # --------------------------------------------------------------------
@@ -245,9 +257,10 @@ def preprocess_dfs(
 
         if numeric_bounds and (lower_val is not None or upper_val is not None):
             if lower_val is not None:
-                df_concat = df_concat.filter(pl.col(col) >= lower_val)
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
             if upper_val is not None:
-                df_concat = df_concat.filter(pl.col(col) <= upper_val)
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
+
             after_count = df_concat.height
             print(f"Column '{col}': kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
 
@@ -368,21 +381,21 @@ if __name__ == "__main__":
     # How to run this file:
     # python -m src.process.construct_graph
 
-    schema = parse_yaml("configs/data.yaml")
+    schema = parse_yaml("data/data.yaml")
 
     # --------------------------------------------------------------------
     # Preprocess dataframes
     # --------------------------------------------------------------------
-    task_df = preprocess_dfs(schema, "w6tasks")
+    task_df = preprocess_dfs(schema, "tasks")
     task_df = task_df.with_columns(
         (pl.col("SCHEDULEDFINISH") - pl.col("SCHEDULEDSTART")).alias("SCHEDULECOMPLETIONTIME")
     )
 
-    assignment_df = preprocess_dfs(schema, "w6assignments")
+    assignment_df = preprocess_dfs(schema, "assignments")
 
-    engineer_df = preprocess_dfs(schema, "w6engineers")
+    engineer_df = preprocess_dfs(schema, "engineers")
 
-    district_df = preprocess_dfs(schema, "w6districts")
+    district_df = preprocess_dfs(schema, "districts")
     district_df = district_df.with_columns(
         pl.col("POSTCODE").cast(pl.Utf8).str.slice(0, 5).alias("POSTCODE")
     )
