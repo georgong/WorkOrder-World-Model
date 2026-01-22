@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import numpy as np
 import yaml
-
+from .feature_engineering import process_assignment_feature,process_districts_feature,process_engineer_feature,process_task_feature
+from .feature_schema import assignment_schema,district_schema,engineer_schema,task_schema
 DTYPE_MAP = {
     "Int64": pl.Int64,
     "Float64": pl.Float64,
@@ -17,6 +18,7 @@ DTYPE_MAP = {
 }
 
 NULL_VALUES = ["", " ", "NA", "N/A", "NULL", "null", "None"]
+
 
 
 TYPE_DIR_MAP = {
@@ -29,6 +31,13 @@ TYPE_DIR_MAP = {
     "task_types": "W6TASK_TYPES",
     "equipment": "W6EQUIPMENT",
     "regions": "W6REGIONS",
+}
+
+preprocessing_dict = {
+    "tasks":{"func":process_task_feature,"schema":task_schema},
+    "assignments":{"func":process_assignment_feature,"schema":assignment_schema},
+    "districts":{"func":process_districts_feature,"schema":district_schema},
+    "engineers":{"func":process_engineer_feature,"schema":engineer_schema},
 }
 def _resolve_files(data_dir: Path, base: str) -> List[Path]:
     """
@@ -313,10 +322,7 @@ def split_tables_by_trait(
         node_cols = list(dict.fromkeys(node_cols))
         edge_cols = list(dict.fromkeys(edge_cols))
 
-        node_df = df.select(node_cols) if node_cols else df.select([])
-        edge_df = df.select(edge_cols) if edge_cols else df.select([])
-
-        out[table_name] = (node_df, edge_df)
+        out[table_name] = (node_cols, edge_cols)
 
     return out
 
@@ -361,26 +367,27 @@ class GraphBuilder:
         #TODO: change the placement tensor into real feature tensor after feature engineering
         feature_dicts = {
             "tasks": (
-                list(tasks_node.columns),      # node feature columns
-                list(tasks_edge.columns),      # edge feature columns
+                list(tasks_node),      # node feature columns
+                list(tasks_edge),      # edge feature columns
             ),
             "assignments": (
-                list(assign_node.columns),
-                list(assign_edge.columns),
+                list(assign_node),
+                list(assign_edge),
             ),
             "engineers": (
-                list(engineer_node.columns),
-                list(engineer_edge.columns),
+                list(engineer_node),
+                list(engineer_edge),
             ),
             "districts": (
-                list(district_node.columns),
-                list(district_edge.columns),
+                list(district_node),
+                list(district_edge),
             ),
             "departments": (
-                list(department_node.columns),
-                list(department_edge.columns),
+                list(department_node),
+                list(department_edge),
             ),
         }
+
         # ---
         # feature engineering for each node and edge type
         # TODO: implement feature engineering functions
@@ -393,7 +400,8 @@ class GraphBuilder:
 
         # nodes
         for table_name, df in TABLE_DICT.items():
-            self.graph[table_name].x = TABLE_DICT[table_name][feature_dicts[table_name][0]]
+            feature = preprocessing_dict[table_name]["func"](TABLE_DICT[table_name],preprocessing_dict[table_name]["schema"])
+            self.graph[table_name].x = feature
 
         # edges
         for src_table, metadata in self.yaml["mappings"].items():
