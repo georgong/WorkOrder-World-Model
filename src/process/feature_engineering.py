@@ -342,9 +342,9 @@ def process_engineer_feature(
     engineer_df = engineer_df.drop("NAME")
     
     # filter availability factor to be 0.0 or 1.0
-    engineer_df = engineer_df.filter(
-        pl.col("AVAILABILITYFACTOR").is_in([0.0, 1.0])
-    )
+    # engineer_df = engineer_df.filter(
+    #     pl.col("AVAILABILITYFACTOR").is_in([0.0, 1.0])
+    # )
 
     engineer_feat = build_feature_table(
         engineer_df,
