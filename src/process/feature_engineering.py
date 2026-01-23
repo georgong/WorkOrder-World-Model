@@ -388,3 +388,12 @@ def process_districts_feature(
     )
 
     return districts_feat
+
+def process_departments_feature(
+    departments_df: pl.DataFrame,
+    schema: FeatureSchema,
+) -> pl.DataFrame:
+    '''
+    Process raw district dataframe into districts feature table
+    '''
+    perfix = 'departments'

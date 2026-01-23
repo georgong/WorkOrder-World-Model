@@ -15,8 +15,9 @@ from .feature_engineering import (
     process_districts_feature,
     process_engineer_feature,
     process_task_feature,
+    #process_equipments_feature,
 )
-from .feature_schema import assignment_schema, district_schema, engineer_schema, task_schema
+from .feature_schema import assignment_schema, district_schema, engineer_schema, task_schema #equipment_schema
 
 
 DTYPE_MAP = {
@@ -70,36 +71,102 @@ def load_table(schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw")
     base = TYPE_DIR_MAP[df_type]
     files = _resolve_files(data_dir_p, base)
     if not files:
-        raise FileNotFoundError(
-            f"No files found for df_type={df_type!r} under {data_dir_p} "
-            f"(expected {base}.csv or {base}-*.csv)"
-        )
+        raise FileNotFoundError(f"No files found for {df_type=} under {data_dir_p} (expected {base}.csv or {base}-*.csv)")
 
-    ds = schema["datasets"][df_type]
-    vars_meta = ds["variables"]
+    # schema path: schema["datasets"][df_type]["variables"]  (your earlier layout)
+    vars_meta = schema["datasets"][df_type]["variables"]
     cols = list(vars_meta.keys())
 
-    pl_schema = {col: DTYPE_MAP.get((meta or {}).get("dtype", "string"), pl.Utf8) for col, meta in vars_meta.items()}
+    pl_schema = {
+        col: DTYPE_MAP.get(meta.get("dtype", "string"), pl.Utf8)
+        for col, meta in vars_meta.items()
+    }
 
     dfs: List[pl.DataFrame] = []
     for f in files:
         df = pl.read_csv(
             f,
-            columns=cols,
-            schema_overrides=pl_schema,
+            columns=cols,                     # only keep known columns
+            schema_overrides=pl_schema,        # enforce dtypes
             null_values=NULL_VALUES,
             ignore_errors=True,
             truncate_ragged_lines=True,
         )
-        # shards 可能缺列
+
+        # ensure all requested columns exist (some shards may miss a column)
         missing = [c for c in cols if c not in df.columns]
         if missing:
             df = df.with_columns([pl.lit(None).cast(pl_schema[c]).alias(c) for c in missing]).select(cols)
         else:
             df = df.select(cols)
+
         dfs.append(df)
 
-    return pl.concat(dfs, how="vertical", rechunk=True)
+    df_concat = pl.concat(dfs, how="vertical", rechunk=True)
+    df_concat = preprocess_df(df_concat, vars_meta)
+    return df_concat
+
+def preprocess_df(df_concat, vars_meta):
+    '''
+    Preprocess the dataframe by removing outliers based on the metadata provided.
+    Support categorical, numeric, and datetime outlier types.
+    
+    Args:
+        df_concat (pl.DataFrame): The input dataframe to preprocess.
+        vars_meta (Dict[str, Dict[str, Any]]): Metadata containing outlier information for
+            each column.
+    Returns:
+        pl.DataFrame: The preprocessed dataframe with outliers removed.
+    '''
+
+    for col, meta in vars_meta.items():
+        outlier = meta.get("outlier", None)
+        outlier_type = meta.get("outlier_type", None)
+        if outlier is None or outlier_type is None:
+            continue
+
+        before_count = df_concat.height
+
+        if outlier_type == "categorical":
+            # Only keep rows where value is in outlier list
+            include_values = [x for x in outlier if x not in [None, "None"]]
+            df_concat = df_concat.filter(pl.col(col).is_in(include_values))
+            after_count = df_concat.height
+            print(f"Column '{col}' (categorical): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+
+        elif outlier_type == "numeric":
+            lower, upper = outlier[0], outlier[1]
+            try:
+                lower_val = float(lower) if lower not in [None, "None"] else None
+                upper_val = float(upper) if upper not in [None, "None"] else None
+            except (ValueError, TypeError):
+                lower_val, upper_val = None, None
+
+            if lower_val is not None:
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
+            if upper_val is not None:
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
+
+            after_count = df_concat.height
+            print(f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+        
+        elif outlier_type == "datetime":
+            lower, upper = outlier[0], outlier[1]
+            lower_val = pl.Series([lower]).str.to_datetime().to_list()[0] if lower not in [None, "None"] else None
+            upper_val = pl.Series([upper]).str.to_datetime().to_list()[0] if upper not in [None, "None"] else None
+
+            if lower_val is not None:
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
+            if upper_val is not None:
+                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
+
+            after_count = df_concat.height
+            print(f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+
+        else:
+            raise ValueError(f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
+
+    return df_concat
 
 
 # -------------------------
@@ -440,6 +507,7 @@ class GraphBuilder:
         self.data[node_type].x = X_node
         self.data[node_type].node_ids = node_ids  # keep raw ids for reverse mapping/debug
         self.data[node_type].num_nodes = len(node_ids)
+        self.data[node_type].attr_name = feat_obj.columns
 
         # 5) store masks (which columns are hidden at prediction time) as metadata lists
         # (PyG doesn't care, but you do.)
@@ -522,6 +590,7 @@ class GraphBuilder:
         # clean temporary fields if you don't want them
         # (but keeping them is super useful for debugging)
         return self.data
+    
 
 
 # -------------------------
@@ -531,6 +600,7 @@ def _demo_test(schema: Dict[str, Any]) -> None:
     gb = GraphBuilder(yaml=schema, data_dir="data/raw")
     g = gb.build()
     print(g)
+    print(g["tasks"].attr_name)
 
     # quick peek
     for ntype in g.node_types:
@@ -538,6 +608,8 @@ def _demo_test(schema: Dict[str, Any]) -> None:
 
     for etype in g.edge_types[:10]:
         print(etype, g[etype].edge_index.shape)
+
+    torch.save(g, "data/graph/sdge.pt")
 
 
 if __name__ == "__main__":

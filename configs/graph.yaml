@@ -31,6 +31,8 @@ datasets:
         key: false
         mask: false
         trait_type: edge
+        outlier_type: datetime
+        outlier: ["1980-01-01", "2030-01-01"]
 
       W6KEY:
         dtype: Int64
@@ -117,6 +119,8 @@ datasets:
         key: false
         mask: false
         trait_type: node
+        outlier_type: categorical
+        outlier: [0.0, 1.0]
       ACTIVE:
         dtype: Int64
         key: false
@@ -142,6 +146,8 @@ datasets:
         key: false
         mask: false
         trait_type: node
+        outlier_type: numeric
+        outlier: [0.0, 5.0]
       W6KEY:
         dtype: Int64
         key: true
@@ -195,6 +201,8 @@ datasets:
         key: false
         mask: false
         trait_type: edge
+        outlier_type: datetime
+        outlier: ["1980-01-01", "2030-01-01"] # 50 years of data
       SCHEDULEDFINISH:
         dtype: datetime64[ns]
         key: false
@@ -205,16 +213,22 @@ datasets:
         key: false
         mask: false
         trait_type: edge
+        outlier_type: datetime
+        outlier: ["1980-01-01", "2030-01-01"]
       Z_SCHEDULEDSTART_DATE:
         dtype: datetime64[ns]
         key: false
         mask: false
         trait_type: edge
+        outlier_type: datetime
+        outlier: ["1980-01-01", "2030-01-01"]
       Z_SCHEDULEDFINISH_DATE:
         dtype: datetime64[ns]
         key: false
         mask: false
         trait_type: edge
+        outlier_type: datetime
+        outlier: ["1980-01-01", "2030-01-01"]
       DURATION:
         dtype: Float64
         key: false
@@ -237,6 +251,8 @@ datasets:
         key: false
         mask: false
         trait_type: node
+        # outlier_type: categorical
+        # outlier: [32.0, 143.0, 88.0, 107.0, 43.0, 31.0, 230.0, 231.0, 108.0, 233.0] # these values occur only once in the dataset
       ISCREWTASK:
         dtype: Float64
         key: false
@@ -582,14 +598,6 @@ mappings:
       engineers:
         left_on: ASSIGNEDENGINEERS
         right_on: NAME
-
-      districts:
-        left_on: DISTRICT
-        right_on: W6KEY
-
-      departments:
-        left_on: DEPARTMENT
-        right_on: W6KEY
 
   engineers:
     entity_key: NAME
