@@ -3,7 +3,9 @@ from __future__ import annotations
 from typing import List
 import math
 import polars as pl
+import numpy as np
 
+from src.process.feature_schema import FeatureSchema
 
 def _add_time_features(
     df: pl.DataFrame,
@@ -106,32 +108,36 @@ def build_feature_table(
     """
     df = df.clone()
 
-    # 1) numeric columns: cast + rename with prefix
-    numeric_cols_exist = [c for c in numeric_cols if c in df.columns]
-    num_renames = {c: f"{prefix}_{c}" for c in numeric_cols_exist}
+    # 0) Rename all original columns with prefix
+    rename_map = {c: f"{prefix}_{c}" for c in df.columns}
+    df = df.rename(rename_map)
 
+    # Update column names for downstream steps
+    key_col_prefixed = [rename_map[c] for c in key_col if c in rename_map]
+    category_cols_prefixed = [rename_map[c] for c in category_cols if c in rename_map]
+    numeric_cols_prefixed = [rename_map[c] for c in numeric_cols if c in rename_map]
+    time_cols_prefixed = [rename_map[c] for c in time_cols if c in rename_map]
+
+    # 1) numeric columns: cast + rename with prefix
     num_exprs = []
-    for c in numeric_cols_exist:
-        num_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(num_renames[c]))
+    for c in numeric_cols_prefixed:
+        num_exprs.append(pl.col(c).cast(pl.Float64, strict=False).alias(c))
     if num_exprs:
         df = df.with_columns(num_exprs)
 
-    prefixed_numeric_cols = list(num_renames.values())
-
     # 2) time features
-    time_cols_exist = [c for c in time_cols if c in df.columns]
-    df = _add_time_features(df, time_cols_exist, prefix=prefix)
+    # time_cols_exist = [c for c in time_cols if c in df.columns]
+    # df = _add_time_features(df, time_cols_exist, prefix=prefix)
 
     # collect derived time cols by prefix pattern
     time_derived_cols: List[str] = []
-    for t in time_cols_exist:
-        base_prefix = f"{prefix}_{t}_"
-        time_derived_cols.extend([c for c in df.columns if c.startswith(base_prefix)])
-    time_derived_cols = sorted(set(time_derived_cols))
+    # for t in time_cols_exist:
+        # base_prefix = f"{prefix}_{t}_"
+        # time_derived_cols.extend([c for c in df.columns if c.startswith(base_prefix)])
+    # time_derived_cols = sorted(set(time_derived_cols))
 
     # 3) categorical: top-k compression + one-hot
-    cat_cols_exist = [c for c in category_cols if c in df.columns]
-    for c in cat_cols_exist:
+    for c in category_cols_prefixed:
         # Get top-k non-null categories (as strings)
         top_vals = (
             df.select(pl.col(c).cast(pl.Utf8))
@@ -156,25 +162,24 @@ def build_feature_table(
         )
 
     # One-hot encode (no dummy for null by default in polars)
-    if cat_cols_exist:
+    if category_cols_prefixed:
         # Prefix each categorical column name in dummy output
         # Polars to_dummies uses col name + "_" + value; we first rename cols to include prefix.
-        rename_for_dummy = {c: f"{prefix}_{c}" for c in cat_cols_exist}
-        df_for_dummy = df.select([pl.col(c).alias(rename_for_dummy[c]) for c in cat_cols_exist])
+        df_for_dummy = df.select(category_cols_prefixed)
         df_cat = df_for_dummy.to_dummies()  # UInt8 columns
     else:
         df_cat = pl.DataFrame()
 
     # 4) assemble base + dummy
-    base_cols = key_col + prefixed_numeric_cols + time_derived_cols
-    base_cols = [c for c in base_cols if c in df.columns]  # be tolerant
+    # base_cols = key_col + prefixed_numeric_cols + time_derived_cols
+    # base_cols = [c for c in base_cols if c in df.columns]  # be tolerant
 
-    base_df = df.select(base_cols)
+    # base_df = df.select(base_cols)
 
-    feature_df = base_df.hstack(df_cat) if df_cat.width > 0 else base_df
+    feature_df = df.hstack(df_cat) if df_cat.width > 0 else df
 
     # Drop original categorical/time raw columns (keep only engineered)
-    drop_cols = [c for c in (category_cols + time_cols) if c in feature_df.columns]
+    drop_cols = [c for c in (category_cols_prefixed + time_cols_prefixed) if c in feature_df.columns]
     if drop_cols:
         feature_df = feature_df.drop(drop_cols)
 
@@ -242,3 +247,157 @@ def clean_feat_by_keys(
     keep = mask_primary & mask_any_other
     return df.filter(keep)
 
+
+def process_task_feature(
+        task_df: pl.DataFrame,
+        schema: FeatureSchema
+    ) -> pl.DataFrame:
+    '''
+    Process raw task dataframe into task feature table
+    '''
+    prefix = "task"
+    task_feat = build_feature_table(
+        task_df,
+        key_col=schema.key_cols,
+        category_cols=schema.category_feature,
+        numeric_cols=schema.numeric_feature,
+        time_cols=schema.time_feature,
+        prefix=prefix,
+        top_k_per_cat=30,
+    )
+
+    task_feat = task_feat.with_columns([
+        pl.col(f"{prefix}_DUEDATE").dt.year().alias(f"{prefix}_due_year"),
+        pl.col(f"{prefix}_DUEDATE").dt.month().alias(f"{prefix}_due_month"),
+        pl.col(f"{prefix}_DUEDATE").dt.day().alias(f"{prefix}_due_day"),
+        pl.col(f"{prefix}_DUEDATE").dt.hour().alias(f"{prefix}_due_hour"),
+        pl.col(f"{prefix}_DUEDATE").dt.weekday().alias(f"{prefix}_due_weekday"),
+        # Cyclic encoding
+        (pl.col(f"{prefix}_DUEDATE").dt.month() * 2 * np.pi / 12).sin().alias(f"{prefix}_due_month_sin"),
+        (pl.col(f"{prefix}_DUEDATE").dt.month() * 2 * np.pi / 12).cos().alias(f"{prefix}_due_month_cos"),
+        (pl.col(f"{prefix}_DUEDATE").dt.hour() * 2 * np.pi / 24).sin().alias(f"{prefix}_due_hour_sin"),
+        (pl.col(f"{prefix}_DUEDATE").dt.hour() * 2 * np.pi / 24).cos().alias(f"{prefix}_due_hour_cos"),
+        # Durations
+        ((pl.col(f"{prefix}_DUEDATE") - pl.col(f"{prefix}_SCHEDULEDSTART")).dt.total_hours() / 3600).alias(f"{prefix}_lead_time_hours"),
+        ((pl.col(f"{prefix}_DUEDATE") - pl.col(f"{prefix}_SCHEDULEDFINISH")).dt.total_hours() / 3600).alias(f"{prefix}_slack_time_hours"),
+        ((pl.col(f"{prefix}_SCHEDULEDFINISH") - pl.col(f"{prefix}_SCHEDULEDSTART")).dt.total_hours() / 3600).alias(f"{prefix}_scheduled_duration_hours"),
+    ])
+
+    task_feat = task_feat.drop([f"{prefix}_DUEDATE", f"{prefix}_SCHEDULEDFINISH", f"{prefix}_SCHEDULEDSTART"])
+
+    return task_feat
+
+
+def process_assignment_feature(
+        assignment_df: pl.DataFrame,
+        schema: FeatureSchema
+    ) -> pl.DataFrame:
+    '''
+    Process raw assignment dataframe into assignment feature table
+    '''
+    prefix="assign"
+
+    assignment_feat = build_feature_table(
+        assignment_df,
+        key_col=schema.key_cols,
+        category_cols=schema.category_feature,
+        numeric_cols=schema.numeric_feature,
+        time_cols=schema.time_feature,
+        prefix=prefix,
+        top_k_per_cat=30,
+    )
+
+    assignment_feat = assignment_feat.with_columns([
+        pl.col(f"{prefix}_STARTTIME").dt.year().alias(f"{prefix}_start_time_year"),
+        pl.col(f"{prefix}_STARTTIME").dt.month().alias(f"{prefix}_start_time_month"),
+        pl.col(f"{prefix}_STARTTIME").dt.day().alias(f"{prefix}_start_time_day"),
+        pl.col(f"{prefix}_STARTTIME").dt.hour().alias(f"{prefix}_start_time_hour"),
+        pl.col(f"{prefix}_STARTTIME").dt.weekday().alias(f"{prefix}_start_time_weekday"),
+        # Cyclic encoding
+        (pl.col(f"{prefix}_STARTTIME").dt.month() * 2 * np.pi / 12).sin().alias(f"{prefix}_start_time_month_sin"),
+        (pl.col(f"{prefix}_STARTTIME").dt.month() * 2 * np.pi / 12).cos().alias(f"{prefix}_start_time_month_cos"),
+        (pl.col(f"{prefix}_STARTTIME").dt.hour() * 2 * np.pi / 24).sin().alias(f"{prefix}_start_time_hour_sin"),
+        (pl.col(f"{prefix}_STARTTIME").dt.hour() * 2 * np.pi / 24).cos().alias(f"{prefix}_start_time_hour_cos"),
+    ])
+    assignment_feat = assignment_feat.with_columns(
+    (pl.col(f"{prefix}_COMPLETIONTIME").dt.total_seconds() / 3600)
+    .alias(f"{prefix}_COMPLETIONTIME")
+    )
+    
+    assignment_feat = assignment_feat.drop([f"{prefix}_STARTTIME"])
+    
+    return assignment_feat
+
+
+def process_engineer_feature(
+        engineer_df: pl.DataFrame,
+        schema: FeatureSchema
+    ) -> pl.DataFrame:
+    '''
+    Process raw engineers dataframe into engineers feature table
+    '''
+    prefix="eng"
+    engineer_df = engineer_df.clone()
+    
+    # convert name column to id 
+    engineer_df = engineer_df.with_columns(
+        pl.col("NAME").cast(pl.Categorical).to_physical().alias("NAME_id")
+    )
+    engineer_df = engineer_df.drop("NAME")
+    
+    # filter availability factor to be 0.0 or 1.0
+    # engineer_df = engineer_df.filter(
+    #     pl.col("AVAILABILITYFACTOR").is_in([0.0, 1.0])
+    # )
+
+    engineer_feat = build_feature_table(
+        engineer_df,
+        key_col=schema.key_cols,
+        category_cols=schema.category_feature,
+        numeric_cols=schema.numeric_feature,
+        time_cols=schema.time_feature,
+        prefix=prefix,
+        top_k_per_cat=30,
+    )
+
+    return engineer_feat
+
+
+def process_districts_feature(
+        districts_df: pl.DataFrame,
+        schema: FeatureSchema
+    ) -> pl.DataFrame:
+    '''
+    Process raw districts dataframe into districts feature table
+    '''
+    prefix="district"
+
+    districts_df = districts_df.clone()
+    
+    # convert city and name column to id 
+    districts_df = districts_df.with_columns(
+        pl.col("CITY").cast(pl.Categorical).to_physical().alias("CITY_id"), 
+        pl.col("NAME").cast(pl.Categorical).to_physical().alias("NAME_id"), 
+    )
+    districts_df = districts_df.drop(["CITY", "NAME"])
+
+    districts_feat = build_feature_table(
+        districts_df,
+        key_col=schema.key_cols,
+        category_cols=schema.category_feature,
+        numeric_cols=schema.numeric_feature,
+        time_cols=schema.time_feature,
+        prefix=prefix,
+        top_k_per_cat=30,
+    )
+
+    return districts_feat
+
+def process_departments_feature(
+    departments_df: pl.DataFrame,
+    schema: FeatureSchema,
+) -> pl.DataFrame:
+    '''
+    Process raw district dataframe into districts feature table
+    '''
+    perfix = 'departments'

@@ -89,4 +89,11 @@ Documentation is maintained separately from code.
   * Label definitions
   * Known leakage fields
 
+## process graph
+python -m src.process.edgeless_graph_builder
 
+## run server
+uvicorn server.app:app --host 127.0.0.1 --port 8000 --reload
+
+
+## 

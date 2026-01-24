@@ -1,0 +1,263 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>SDGE HeteroGraph Viewer</title>
+  <style>
+    body { font-family: ui-sans-serif, system-ui; margin: 0; }
+    #topbar {
+      padding: 10px 14px;
+      border-bottom: 1px solid #ddd;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    #status { color: #444; font-size: 13px; }
+    svg { width: 100vw; height: calc(100vh - 52px); display: block; background: #fafafa; }
+    .node { cursor: pointer; }
+    .edge { stroke: #bbb; stroke-opacity: 0.6; }
+    .tooltip {
+      position: fixed;
+      max-width: 420px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+      font-size: 12px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 80ms linear;
+      z-index: 9999;
+    }
+    .tooltip .title { font-weight: 600; margin-bottom: 6px; }
+    .tooltip table { border-collapse: collapse; width: 100%; }
+    .tooltip td { padding: 2px 6px; vertical-align: top; border-top: 1px solid #f1f1f1; }
+    .tooltip td.key { color: #333; width: 38%; word-break: break-word; }
+    .tooltip td.val { color: #111; word-break: break-word; }
+    .muted { color: #777; }
+    input { width: 90px; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <button id="reload">Reload</button>
+    <span class="muted">node_limit</span><input id="node_limit" type="number" value="800" min="50" max="5000">
+    <span class="muted">edge_limit</span><input id="edge_limit" type="number" value="1500" min="50" max="20000">
+    <span id="status"></span>
+  </div>
+
+  <svg id="viz"></svg>
+  <div id="tooltip" class="tooltip"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script>
+    const svg = d3.select("#viz");
+    const tooltip = document.getElementById("tooltip");
+    const statusEl = document.getElementById("status");
+
+    let controller = null;
+    let hoverTimer = null;
+    let lastHoverKey = null;
+
+    function setStatus(s) { statusEl.textContent = s; }
+
+    function showTooltip(x, y, html) {
+      tooltip.innerHTML = html;
+      tooltip.style.left = (x + 12) + "px";
+      tooltip.style.top = (y + 12) + "px";
+      tooltip.style.opacity = 1;
+    }
+
+    function hideTooltip() {
+      tooltip.style.opacity = 0;
+    }
+
+    async function fetchSummary() {
+      const node_limit = Number(document.getElementById("node_limit").value || 800);
+      const edge_limit = Number(document.getElementById("edge_limit").value || 1500);
+      setStatus("Loading summary...");
+      const r = await fetch(`/graph/summary?node_limit=${node_limit}&edge_limit=${edge_limit}&seed=0&use_pos_if_exists=true`);
+      if (!r.ok) throw new Error("summary fetch failed");
+      const j = await r.json();
+      setStatus(`Loaded nodes=${j.nodes.length}, edges=${j.edges.length}`);
+      return j;
+    }
+
+    function keyOf(d) { return `${d.type}:${d.id}`; }
+
+    function render(summary) {
+      svg.selectAll("*").remove();
+
+      const width = svg.node().clientWidth;
+      const height = svg.node().clientHeight;
+
+      const nodes = summary.nodes.map(d => ({...d}));
+      // edges need refs
+      const nodeMap = new Map(nodes.map(n => [keyOf(n), n]));
+      const links = summary.edges
+        .map(e => {
+          const s = nodeMap.get(`${e.src_type}:${e.src}`);
+          const t = nodeMap.get(`${e.dst_type}:${e.dst}`);
+          if (!s || !t) return null;
+          return { source: s, target: t, rel: e.rel };
+        })
+        .filter(Boolean);
+
+      const g = svg.append("g");
+
+      const zoom = d3.zoom()
+        .scaleExtent([0.1, 5])
+        .on("zoom", (event) => g.attr("transform", event.transform));
+      svg.call(zoom);
+
+      const link = g.append("g")
+        .selectAll("line")
+        .data(links)
+        .join("line")
+        .attr("class", "edge");
+
+      // color by node type (simple hash)
+      function typeColor(t) {
+        let h = 0;
+        for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+        const hue = h % 360;
+        return `hsl(${hue}, 55%, 55%)`;
+      }
+
+      const node = g.append("g")
+        .selectAll("circle")
+        .data(nodes)
+        .join("circle")
+        .attr("class", "node")
+        .attr("r", 4.2)
+        .attr("fill", d => typeColor(d.type));
+
+      const label = g.append("g")
+        .selectAll("text")
+        .data(nodes)
+        .join("text")
+        .text(d => d.label)
+        .attr("font-size", 9)
+        .attr("fill", "#333")
+        .attr("dx", 6)
+        .attr("dy", 3);
+
+      // If pos is meaningful, start from it; still run a gentle sim to reduce overlap
+      const sim = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id(d => keyOf(d)).distance(28).strength(0.2))
+        .force("charge", d3.forceManyBody().strength(-28))
+        .force("center", d3.forceCenter(width / 2, height / 2))
+        .force("collision", d3.forceCollide(6))
+        .on("tick", () => {
+          link
+            .attr("x1", d => d.source.x)
+            .attr("y1", d => d.source.y)
+            .attr("x2", d => d.target.x)
+            .attr("y2", d => d.target.y);
+
+          node
+            .attr("cx", d => d.x)
+            .attr("cy", d => d.y);
+
+          label
+            .attr("x", d => d.x)
+            .attr("y", d => d.y);
+        });
+
+      node
+        .on("mouseenter", (event, d) => {
+          // debounce hover requests
+          if (hoverTimer) clearTimeout(hoverTimer);
+
+          const hoverKey = keyOf(d);
+          lastHoverKey = hoverKey;
+
+          hoverTimer = setTimeout(async () => {
+            // cancel previous request
+            if (controller) controller.abort();
+            controller = new AbortController();
+
+            const x = event.clientX;
+            const y = event.clientY;
+
+            showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">Loading...</div>`);
+
+            try {
+              const r = await fetch(`/node/${encodeURIComponent(d.type)}/${d.id}`, { signal: controller.signal });
+              if (!r.ok) throw new Error("node fetch failed");
+              const j = await r.json();
+
+              // If user moved away, ignore
+              if (lastHoverKey !== hoverKey) return;
+
+              if (j.error) {
+                showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">${j.error}</div>`);
+                return;
+              }
+
+              const rows = Object.entries(j.attrs || {})
+                .slice(0, 60)
+                .map(([k, v]) => {
+                  let vv = (typeof v === "object") ? JSON.stringify(v) : String(v);
+                  if (vv.length > 180) vv = vv.slice(0, 180) + "...";
+                  return `<tr><td class="key">${k}</td><td class="val">${vv}</td></tr>`;
+                })
+                .join("");
+
+              const html =
+                `<div class="title">${j.label || d.label}</div>` +
+                `<div class="muted">${j.type}:${j.id}</div>` +
+                `<table>${rows || `<tr><td class="muted">No attrs</td><td></td></tr>`}</table>`;
+
+              showTooltip(x, y, html);
+            } catch (e) {
+              if (e.name === "AbortError") return;
+              showTooltip(event.clientX, event.clientY, `<div class="title">${d.label}</div><div class="muted">Error: ${e}</div>`);
+            }
+          }, 80);
+        })
+        .on("mousemove", (event) => {
+          // keep tooltip near cursor
+          tooltip.style.left = (event.clientX + 12) + "px";
+          tooltip.style.top = (event.clientY + 12) + "px";
+        })
+        .on("mouseleave", () => {
+          lastHoverKey = null;
+          if (hoverTimer) clearTimeout(hoverTimer);
+          if (controller) controller.abort();
+          hideTooltip();
+        });
+
+      // drag
+      node.call(d3.drag()
+        .on("start", (event, d) => {
+          if (!event.active) sim.alphaTarget(0.2).restart();
+          d.fx = d.x; d.fy = d.y;
+        })
+        .on("drag", (event, d) => {
+          d.fx = event.x; d.fy = event.y;
+        })
+        .on("end", (event, d) => {
+          if (!event.active) sim.alphaTarget(0);
+          d.fx = null; d.fy = null;
+        })
+      );
+    }
+
+    async function main() {
+      try {
+        const summary = await fetchSummary();
+        render(summary);
+      } catch (e) {
+        setStatus(`Failed: ${e}`);
+        console.error(e);
+      }
+    }
+    
+
+    document.getElementById("reload").addEventListener("click", main);
+    main();
+  </script>
+</body>
+</html>

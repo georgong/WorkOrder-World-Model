@@ -1,14 +1,8 @@
 # Core numerical
-numpy>=1.23,<2.0
-
-# DataFrame / table processing
-pandas>=2.0,<3.0
+numpy==1.26.4
+pandas==2.2.2
 polars==1.35.1
-
-# Deep learning
-torch>=2.1,<2.4
-
-# PyTorch Geometric (installed after torch)
-torch-geometric>=2.4,<2.6
-
+uvicorn==0.37.0
 pyyaml
+pydantic
+pyarrow
