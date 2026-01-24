@@ -104,6 +104,12 @@ def load_table(schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw")
 
     df_concat = pl.concat(dfs, how="vertical", rechunk=True)
     df_concat = preprocess_df(df_concat, vars_meta)
+    if df_type == "assignments":
+        df_concat = df_concat.with_columns(
+            (pl.col("FINISHTIME") - pl.col("STARTTIME")).alias("COMPLETIONTIME")
+        )
+
+        df_concat = df_concat.drop("FINISHTIME")
     return df_concat
 
 def preprocess_df(df_concat, vars_meta):
@@ -268,16 +274,25 @@ def _ensure_2d(t: torch.Tensor, name: str) -> torch.Tensor:
 # -------------------------
 # Core: build node index mapping + aggregate features by entity_key
 # -------------------------
-def _build_node_index(df: pl.DataFrame, entity_key: str) -> Tuple[pl.DataFrame, List[Any]]:
+def _build_node_index(df: pl.DataFrame, entity_key: str, name:str) -> Tuple[pl.DataFrame, List[Any]]:
     assert entity_key in df.columns, f"entity_key={entity_key!r} not in df.columns={df.columns}"
-    keys = (
-        df.select(entity_key)
-        .drop_nulls()
-        .unique()
-        .sort(entity_key)
-        .with_row_index("__idx")  # 0..N-1
-    )
-    node_ids = keys[entity_key].to_list()
+    if entity_key != name:
+        keys = (
+            df.select([entity_key,name])
+            .drop_nulls()
+            .unique()
+            .sort(entity_key)
+            .with_row_index("__idx")  # 0..N-1
+        )
+    else:
+        keys = (
+            df.select([entity_key])
+            .drop_nulls()
+            .unique()
+            .sort(entity_key)
+            .with_row_index("__idx")  # 0..N-1
+        ) 
+    node_ids = keys[name].to_list()
     return keys, node_ids
 
 
@@ -468,10 +483,11 @@ class GraphBuilder:
     def _build_nodes_one(self, node_type: str) -> None:
         cfg = self.yaml["mappings"][node_type]
         entity_key = cfg["entity_key"]
+        name = cfg["name"]
         df = self.tables[node_type]
 
         # 1) build stable node index
-        keys_sorted, node_ids = _build_node_index(df, entity_key)
+        keys_sorted, node_ids = _build_node_index(df, entity_key, name)
 
         # 2) build row-level feature matrix
         feat_obj: Any = None
@@ -504,16 +520,44 @@ class GraphBuilder:
         X_node = _ensure_2d(X_node, f"{node_type} node-features")
 
         # 4) store into HeteroData
-        self.data[node_type].x = X_node
+
         self.data[node_type].node_ids = node_ids  # keep raw ids for reverse mapping/debug
         self.data[node_type].num_nodes = len(node_ids)
         self.data[node_type].attr_name = feat_obj.columns
+        attr_name = self.data[node_type].attr_name
+
+        ### if the assign_COMPLETIONTIME: target in the attr_name, select it and make it as y
+        X = X_node
+        target_col = "assign_COMPLETIONTIME"
+
+        if target_col in attr_name:
+            k = attr_name.index(target_col)
+
+            # 1. 拿出来当 y
+            y = X[:, k].clone()
+
+            # 2. 从 x 里删除这一列
+            X_new = torch.cat([X[:, :k], X[:, k+1:]], dim=1)
+
+            # 3. 更新 attr_name
+            new_attr_name = attr_name[:k] + attr_name[k+1:]
+
+            # 4. 写回
+            self.data[node_type].x = X_new
+            self.data[node_type].y = y
+            self.data[node_type].attr_name = new_attr_name
+
+        else:
+            # 没有 target，就正常塞 x
+            self.data[node_type].x = X
 
         # 5) store masks (which columns are hidden at prediction time) as metadata lists
         # (PyG doesn't care, but you do.)
         vars_cfg = self.yaml["datasets"][node_type]["variables"]
         mask_cols = [c for c, info in vars_cfg.items() if bool((info or {}).get("mask", False))]
         self.data[node_type].mask_cols = mask_cols
+        if node_type == "assignments":
+            mask_cols.append("COMPLETIONTIME")
 
         # cache mapping table for edge building
         self.data[node_type].__key_index = keys_sorted  # polars df [__idx, entity_key]

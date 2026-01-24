@@ -319,6 +319,10 @@ def process_assignment_feature(
         (pl.col(f"{prefix}_STARTTIME").dt.hour() * 2 * np.pi / 24).sin().alias(f"{prefix}_start_time_hour_sin"),
         (pl.col(f"{prefix}_STARTTIME").dt.hour() * 2 * np.pi / 24).cos().alias(f"{prefix}_start_time_hour_cos"),
     ])
+    assignment_feat = assignment_feat.with_columns(
+    (pl.col(f"{prefix}_COMPLETIONTIME").dt.total_seconds() / 3600)
+    .alias(f"{prefix}_COMPLETIONTIME")
+    )
     
     assignment_feat = assignment_feat.drop([f"{prefix}_STARTTIME"])
     

@@ -456,15 +456,11 @@ class GraphBuilder:
 
         pass
 
-    def visualize_node(self,node_type,node_id):
-        pass
 
     def setup_logger(self):
         logger = Logger(__name__)
         return logger
     
-    def visualize_graph(self):
-        pass
 
 
 if __name__ == "__main__":

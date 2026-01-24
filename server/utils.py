@@ -1,3 +1,4 @@
+# server/utils.py
 from __future__ import annotations
 
 import math
@@ -33,14 +34,24 @@ def _to_jsonable(v: Any, *, allow_large: bool = False) -> Any:
 
 
 def _node_label(store, ntype: str, nid: int) -> str:
-    for key in ["name", "NAME", "W6KEY", "id", "ID", "task_id", "engineer_id"]:
+    for key in ["node_ids", "name", "NAME", "W6KEY", "id", "ID", "task_id", "engineer_id"]:
         if hasattr(store, key):
             v = getattr(store, key)
+
+            # list/tuple labels (common for raw ids)
+            if isinstance(v, (list, tuple)) and nid < len(v):
+                try:
+                    return str(v[nid])
+                except Exception:
+                    pass
+
+            # 1D tensor labels
             if isinstance(v, torch.Tensor) and v.ndim == 1 and nid < v.shape[0]:
                 try:
                     return str(_to_jsonable(v[nid]))
                 except Exception:
                     pass
+
     return f"{ntype}:{nid}"
 
 
@@ -311,6 +322,7 @@ def build_graph_summary(
 
     # ---- 8) Build node payload
     flat_nodes = [(t, i) for t, ids in picked.items() for i in ids]
+    print(flat_nodes)
     fallback = _fallback_layout(len(flat_nodes), seed=seed)
 
     nodes_out: List[Dict[str, Any]] = []
@@ -319,10 +331,12 @@ def build_graph_summary(
         pos = _get_pos(store, nid) if use_pos_if_exists else None
         if pos is None:
             pos = fallback[idx]
+        node_id = _node_label(store, ntype, nid)  # 这里就是你的 name / node_ids
         nodes_out.append({
             "type": ntype,
-            "id": int(nid),
-            "label": _node_label(store, ntype, nid),
+            "id": int(nid),          # 仍然是 index
+            "node_id": node_id,      # 这是你说的 node_ids(name)
+            "label": node_id,        # 直接用它当 label，省得绕
             "x": float(pos[0]),
             "y": float(pos[1]),
         })
@@ -552,10 +566,12 @@ def build_ego_summary(
         pos = _get_pos(store, nid) if use_pos_if_exists else None
         if pos is None:
             pos = fallback[idx]
+        node_id = _node_label(store, ntype, nid)
         nodes_out.append(
             {
                 "type": ntype,
                 "id": int(nid),
+                "node_id":node_id,
                 "label": _node_label(store, ntype, nid),
                 "x": float(pos[0]),
                 "y": float(pos[1]),
