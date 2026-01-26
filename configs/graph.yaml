@@ -133,12 +133,12 @@ datasets:
         trait_type: node
       DEPARTMENT:
         dtype: Int64
-        key: false      
+        key: false    
         mask: false
         trait_type: node
       DISTRICT:
         dtype: Int64
-        key: false
+        key: 
         mask: false
         trait_type: node
       EFFICIENCY:
@@ -165,13 +165,13 @@ datasets:
         trait_type: node
       DISTRICT:
         dtype: Int64
-        key: false
+        key: true
         mask: false
         trait_type: node
       
       DEPARTMENT:
         dtype: Int64
-        key: false
+        key: true
         mask: false
         trait_type: node
       CALLID:
@@ -215,20 +215,20 @@ datasets:
         trait_type: edge
         outlier_type: datetime
         outlier: ["1980-01-01", "2030-01-01"]
-      Z_SCHEDULEDSTART_DATE:
-        dtype: datetime64[ns]
-        key: false
-        mask: false
-        trait_type: edge
-        outlier_type: datetime
-        outlier: ["1980-01-01", "2030-01-01"]
-      Z_SCHEDULEDFINISH_DATE:
-        dtype: datetime64[ns]
-        key: false
-        mask: false
-        trait_type: edge
-        outlier_type: datetime
-        outlier: ["1980-01-01", "2030-01-01"]
+      # Z_SCHEDULEDSTART_DATE:
+      #   dtype: datetime64[ns]
+      #   key: false
+      #   mask: false
+      #   trait_type: edge
+      #   outlier_type: datetime
+      #   outlier: ["1980-01-01", "2030-01-01"]
+      # Z_SCHEDULEDFINISH_DATE:
+      #   dtype: datetime64[ns]
+      #   key: false
+      #   mask: false
+      #   trait_type: edge
+      #   outlier_type: datetime
+      #   outlier: ["1980-01-01", "2030-01-01"]
       DURATION:
         dtype: Float64
         key: false
@@ -267,7 +267,7 @@ datasets:
         trait_type: node
       STATUS:
         dtype: Int64
-        key: false
+        key: true
         mask: true
         trait_type: edge
       JEOPARDYSTATE:
@@ -301,7 +301,7 @@ datasets:
         trait_type: node
       NAME:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       REVISION:
@@ -325,7 +325,7 @@ datasets:
         trait_type: node
       NAME:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       PRIORITY:
@@ -378,7 +378,7 @@ datasets:
       # optional identifiers / grouping (node)
       COMPANY:
         dtype: Float64
-        key: false
+        key: true
         mask: false
         trait_type: node
       PRIORITYCODEDEPT:
@@ -510,12 +510,12 @@ datasets:
         trait_type: node
       STATE:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       POSTCODE:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
 
@@ -529,7 +529,7 @@ datasets:
         trait_type: node
       NAME:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       Z_REGION_ABBR:
@@ -539,12 +539,12 @@ datasets:
         trait_type: node
       Z_REGION_NAME:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       COMPANY:
         dtype: string
-        key: false
+        key: true
         mask: false
         trait_type: node
       DEPARTMENTPARENT:

@@ -341,9 +341,9 @@ def process_engineer_feature(
     
     # convert name column to id 
     engineer_df = engineer_df.with_columns(
-        pl.col("NAME").cast(pl.Categorical).to_physical().alias("NAME_id")
+        pl.col("NAME").cast(pl.Categorical).to_physical().alias("NAME")
     )
-    engineer_df = engineer_df.drop("NAME")
+    #engineer_df = engineer_df.drop("NAME")
     
     # filter availability factor to be 0.0 or 1.0
     # engineer_df = engineer_df.filter(
