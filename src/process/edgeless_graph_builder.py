@@ -4,6 +4,8 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+
+import os
 import numpy as np
 import polars as pl
 import torch
@@ -712,11 +714,47 @@ class GraphBuilder:
                 # reverse edge (optional but usually helpful)
                 rev_rel = (dst_type, f"rev_{edge_type}", src_type)
                 self.data[rev_rel].edge_index = edge_index.flip(0)
+    
+    def _build_edges_by_shared_edge_trait(self):
+        for node_type, node_cfg in self.yaml["mappings"].items():
+            df = self.tables[node_type]
+            vars_cfg = self.yaml["datasets"][node_type]["variables"]
+            entity_key = node_cfg["entity_key"]
+            keys_sorted = self.data[node_type].__key_index
+
+            for col, meta in vars_cfg.items():
+                if meta.get("trait_type") != "edge":
+                    continue
+
+                # Optionally, transform value (e.g., extract month from datetime)
+                if meta.get("dtype", "").startswith("datetime"):
+                    group_vals = df[col].dt.month()
+                else:
+                    group_vals = df[col]
+
+                # Group by the edge variable
+                groups = df.with_columns(group_vals.alias("__group_val")).groupby("__group_val")
+
+                for group_val, group_df in groups:
+                    node_ids = group_df[entity_key].to_list()
+                    # Create all pairs (i, j) where i != j
+                    for i in range(len(node_ids)):
+                        for j in range(i + 1, len(node_ids)):
+                            src_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[i])["__idx"][0]
+                            dst_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[j])["__idx"][0]
+                            # Add edge (src_idx, dst_idx) and (dst_idx, src_idx) if undirected
+
+                    # Collect all edges for this group and add to self.data
+
+                # You may want to batch this for efficiency
+
+                # Store as a new edge type, e.g., (node_type, f"shared_{col}", node_type)
 
     def build(self) -> HeteroData:
         self._load_all_tables()
         self._build_all_nodes()
         self._build_edges()
+
 
         # sanity checks
         for ntype in self.data.node_types:
@@ -764,11 +802,11 @@ def _demo_test(schema: Dict[str, Any]) -> None:
 
     # quick peek
 
+    # torch.save(g, "data/graph/sdge.pt")
     
-
-
-
-    torch.save(g, "data/graph/sdge.pt")
+    out_put_dir = "data/graph"
+    os.makedirs(out_put_dir, exist_ok=True)
+    torch.save(g, os.path.join(out_put_dir, "sdge.pt"))
 
 
 if __name__ == "__main__":
