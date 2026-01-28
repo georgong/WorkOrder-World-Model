@@ -469,7 +469,7 @@ class GraphBuilder:
 
             df_concat = df_concat.drop("FINISHTIME")
             before = df_concat.height
-            cap = df_concat.select(pl.col("COMPLETIONTIME").quantile(0.999)).item()
+            cap = df_concat.select(pl.col("COMPLETIONTIME").quantile(0.99)).item()
 
             df_concat = df_concat.with_columns(
                 pl.when(pl.col("COMPLETIONTIME") > cap)
@@ -480,7 +480,7 @@ class GraphBuilder:
 
             after = df_concat.height
             dropped = before - after
-            print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.999)={cap}")
+            print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.99)={cap}")
         return df_concat
 
     def _preprocess_df(self, df_concat, vars_meta):
