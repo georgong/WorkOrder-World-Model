@@ -793,17 +793,10 @@ class GraphBuilder:
     
 
 
-# -------------------------
-# Demo entry
-# -------------------------
-def _demo_test(schema: Dict[str, Any]) -> None:
+
+def main(schema: Dict[str, Any]) -> None:
     gb = GraphBuilder(yaml=schema, data_dir="data/raw")
     g = gb.build()
-
-    # quick peek
-
-    # torch.save(g, "data/graph/sdge.pt")
-    
     out_put_dir = "data/graph"
     os.makedirs(out_put_dir, exist_ok=True)
     torch.save(g, os.path.join(out_put_dir, "sdge.pt"))
@@ -812,5 +805,4 @@ def _demo_test(schema: Dict[str, Any]) -> None:
 if __name__ == "__main__":
     with open("configs/graph.yaml", "r") as f:
         schema = yaml.safe_load(f)
-
-    _demo_test(schema)
+    main(schema)
