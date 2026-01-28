@@ -10,7 +10,8 @@ data/*
 .idea/
 *.swp
 *.swo
-
+wandb/*
+runs/
 ########################
 # Python
 ########################
@@ -23,7 +24,7 @@ __pycache__/
 .ruff_cache/
 .ipynb_checkpoints/
 .spyproject/
-
+.txt
 ########################
 # Virtual env
 ########################
@@ -67,3 +68,4 @@ data explore/
 *.csv
 *.7z
 *.zip.spyproject
+pipeline_log.txt

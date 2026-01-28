@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .utils import build_graph_summary, get_node_payload
 
-GRAPH_PATH = Path("data/graph/sdge.pt")
+GRAPH_PATH = Path("data/graph/sdge_pruned.pt")
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="SDGE HeteroGraph Server", version="0.5")

@@ -1,0 +1,433 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>SDGE Interpret Viewer</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --panel: #ffffff;
+      --border: #e5e7eb;
+      --text: #111827;
+      --muted: #6b7280;
+      --shadow: 0 10px 30px rgba(0,0,0,0.10);
+    }
+
+    body { font-family: ui-sans-serif, system-ui; margin: 0; background: var(--bg); color: var(--text); }
+    #topbar {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      background: #fff;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+    }
+
+    select, input, button {
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      font-size: 13px;
+    }
+    button { cursor: pointer; }
+    #status { color: var(--muted); font-size: 13px; }
+
+    #layout {
+      display: flex;
+      height: calc(100vh - 56px);
+    }
+
+    svg {
+      flex: 1;
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: var(--bg);
+    }
+
+    #sidebar {
+      width: 1300px;
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 14px 14px 18px 14px;
+      overflow: auto;
+    }
+
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .muted { color: var(--muted); }
+
+    .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; margin: 10px 0 12px; }
+    .k { color: var(--muted); font-size: 12px; }
+    .v { font-size: 12px; }
+
+    .sectionTitle {
+      margin-top: 14px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: var(--muted);
+      padding: 10px;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      background: #fcfcfc;
+    }
+
+    .link { stroke: #c7c7c7; stroke-opacity: 0.55; }
+    .node { cursor: pointer; }
+
+    /* bar chart */
+    #barsvg {
+      width: 100%;
+      height: 260px;
+      display: block;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #fff;
+    }
+
+    .axis text { font-size: 14px; fill: #374151; }
+    .axis path, .axis line { stroke: #d1d5db; }
+    .zero-line { stroke: #9ca3af; stroke-width: 1; stroke-dasharray: 3 3; }
+
+    .legend {
+      display:flex; gap:10px; align-items:center; margin-top:8px; font-size:12px; color: var(--muted);
+    }
+    .swatch { width:10px; height:10px; border-radius:2px; display:inline-block; }
+  </style>
+</head>
+<body>
+  <div id="topbar">
+    <div class="mono">file</div>
+    <select id="fileSel"></select>
+
+    <div class="mono">target</div>
+    <input id="target" value="assignments" size="12" />
+
+    <div class="mono">layers</div>
+    <input id="layers" type="number" value="2" min="1" max="6" style="width:70px" />
+
+    <div class="mono">neighbors</div>
+    <input id="neighbors" type="number" value="10" min="1" max="200" style="width:80px" />
+
+    <button id="loadBtn">Load</button>
+    <div id="status"></div>
+  </div>
+
+  <div id="layout">
+    <svg id="svg"></svg>
+
+    <div id="sidebar">
+      <div class="mono" style="font-size:13px;"><b>Node Inspector</b></div>
+      <div class="muted" style="font-size:12px;margin-top:6px;">
+        Hover a node to see signed contribution + top features.
+      </div>
+
+      <div id="sideContent" class="hint" style="margin-top:12px;">
+        No node selected. Move your mouse over a node.
+      </div>
+    </div>
+  </div>
+
+<script>
+const svg = d3.select("#svg");
+const statusEl = document.getElementById("status");
+const side = document.getElementById("sideContent");
+
+let CURRENT = null; // store last payload to support hover details
+
+function setStatus(s) { statusEl.textContent = s; }
+
+function fmt(x) {
+  if (x === null || x === undefined) return "null";
+  const n = Number(x);
+  if (!isFinite(n)) return String(x);
+  const ax = Math.abs(n);
+  if (ax >= 1) return n.toFixed(6);
+  if (ax >= 1e-3) return n.toExponential(3);
+  return n.toExponential(6);
+}
+
+// node_type -> color
+function colorByType(t) {
+  // D3 categorical palette, stable mapping by type string
+  const types = (CURRENT && CURRENT.node_types) ? CURRENT.node_types : [];
+  const idx = Math.max(0, types.indexOf(t));
+  const scheme = d3.schemeTableau10;
+  return scheme[idx % scheme.length] || "#999";
+}
+
+// abs importance -> opacity
+function opacityFromAbs(a) {
+  // map abs contribution to [0.15, 1.0] with tanh squish
+  const x = Math.max(0, Number(a) || 0);
+  return 0.15 + 0.85 * Math.tanh(x * 6);
+}
+
+async function fetchSeeds() {
+  const r = await fetch("/api/seeds");
+  const j = await r.json();
+  return j.files || [];
+}
+
+async function loadSelected() {
+  const file = document.getElementById("fileSel").value;
+  const target = document.getElementById("target").value.trim() || "assignments";
+  const layers = Number(document.getElementById("layers").value || 2);
+  const neighbors = Number(document.getElementById("neighbors").value || 10);
+
+  setStatus("loading...");
+  side.innerHTML = `<div class="hint">Loading…</div>`;
+
+  const url = `/api/view?file=${encodeURIComponent(file)}&target=${encodeURIComponent(target)}&layers=${layers}&num_neighbors=${neighbors}`;
+  const r = await fetch(url);
+  if (!r.ok) {
+    const t = await r.text();
+    setStatus(`error: ${t}`);
+    side.innerHTML = `<div class="hint">Error: ${t}</div>`;
+    return;
+  }
+  const payload = await r.json();
+  CURRENT = payload;
+
+  // build node_types list for stable colorByType
+  const types = Array.from(new Set(payload.nodes.map(n => n.type))).sort();
+  payload.node_types = types;
+
+  renderGraph(payload);
+}
+
+function renderGraph(payload) {
+  svg.selectAll("*").remove();
+
+  const width = svg.node().clientWidth;
+  const height = svg.node().clientHeight;
+
+  const nodes = payload.nodes.map(d => ({...d}));
+  const links = payload.edges.map(e => ({...e}));
+
+  // Force sim
+  const sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(85).strength(0.25))
+    .force("charge", d3.forceManyBody().strength(-240))
+    .force("center", d3.forceCenter(width / 2, height / 2))
+    .force("collide", d3.forceCollide().radius(14));
+
+  const g = svg.append("g");
+
+  // zoom/pan
+  svg.call(d3.zoom().on("zoom", (ev) => g.attr("transform", ev.transform)));
+
+  const link = g.selectAll(".link")
+    .data(links)
+    .enter()
+    .append("line")
+    .attr("class", "link")
+    .attr("stroke-width", 1.2);
+
+  const NODE_R = 7;
+
+  const node = g.selectAll(".node")
+    .data(nodes)
+    .enter()
+    .append("circle")
+    .attr("class", "node")
+    .attr("r", NODE_R)
+    .attr("fill", d => colorByType(d.type))
+    .attr("opacity", d => opacityFromAbs(d.abs))
+    .attr("stroke", "#111827")
+    .attr("stroke-width", 0.6)
+    .call(d3.drag()
+      .on("start", (ev, d) => {
+        if (!ev.active) sim.alphaTarget(0.25).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on("drag", (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+      .on("end", (ev, d) => {
+        if (!ev.active) sim.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      })
+    );
+
+  node.on("mousemove", (ev, d) => {
+    updateSidebarForNode(d);
+  });
+
+  sim.on("tick", () => {
+    link
+      .attr("x1", d => d.source.x)
+      .attr("y1", d => d.source.y)
+      .attr("x2", d => d.target.x)
+      .attr("y2", d => d.target.y);
+
+    node
+      .attr("cx", d => d.x)
+      .attr("cy", d => d.y);
+  });
+
+  setStatus(`seed=${payload.seed_idx} pred=${payload.pred} | nodes=${nodes.length} edges=${links.length}`);
+}
+
+function updateSidebarForNode(d) {
+  // Prefer per-node feats if backend provides it:
+  // payload.node_feats[nodeId] = [{feat, value, abs}, ...]
+  const nodeFeats = (CURRENT && CURRENT.node_feats && CURRENT.node_feats[d.id]) ? CURRENT.node_feats[d.id] : null;
+
+  // Otherwise, fallback to "global top feats for type"
+  // payload.top_feats[type] = [{feat,value,abs}, ...]
+  const globalTypeFeats = (CURRENT && CURRENT.top_feats && CURRENT.top_feats[d.type]) ? CURRENT.top_feats[d.type] : null;
+
+  // pick what to show
+  const feats = (nodeFeats && nodeFeats.length) ? nodeFeats
+              : (globalTypeFeats && globalTypeFeats.length) ? globalTypeFeats
+              : [];
+
+  const used = (nodeFeats && nodeFeats.length) ? "per-node"
+            : (globalTypeFeats && globalTypeFeats.length) ? "type-global"
+            : "none";
+
+  side.innerHTML = `
+    <div class="mono" style="font-size:13px;"><b>${escapeHtml(d.label || d.id)}</b></div>
+    <div class="muted" style="font-size:12px;margin-top:4px;">
+      type <span class="mono">${escapeHtml(d.type)}</span>
+      ${d.orig !== undefined ? ` | orig <span class="mono">${escapeHtml(String(d.orig))}</span>` : ``}
+    </div>
+
+    <div class="kv">
+      <div class="k">signed</div><div class="v mono">${fmt(d.value)}</div>
+      <div class="k">abs</div><div class="v mono">${fmt(d.abs)}</div>
+      <div class="k">opacity</div><div class="v mono">${fmt(opacityFromAbs(d.abs))}</div>
+      <div class="k">feat source</div><div class="v mono">${used}</div>
+    </div>
+
+    <div class="sectionTitle">Top Features (signed)</div>
+    ${feats.length ? `<svg id="barsvg"></svg>` : `<div class="hint">No feature list available for this node/type.</div>`}
+
+    <div class="legend">
+      <span class="swatch" style="background:#10b981"></span> positive
+      <span class="swatch" style="background:#ef4444"></span> negative
+      <span class="swatch" style="background:#9ca3af"></span> zero line
+    </div>
+  `;
+
+  if (feats.length) {
+    renderBars("#barsvg", feats.slice(0, 20)); // top 20 bars
+  }
+}
+
+function renderBars(sel, feats) {
+  // feats: [{feat, value, abs}]
+  const svg = d3.select(sel);
+  svg.selectAll("*").remove();
+
+  const W = svg.node().clientWidth;
+  const H = svg.node().clientHeight;
+
+  const margin = { top: 14, right: 12, bottom: 12, left: 320 }; // 先粗暴变大
+  const innerW = Math.max(50, W - margin.left - margin.right);
+  const innerH = Math.max(50, H - margin.top - margin.bottom);
+  // Sort by abs descending (so important negative doesn't disappear, because humans)
+  const data = feats
+    .map(d => ({
+      feat: d.feat ?? d.name ?? "feat",
+      value: Number(d.value) || 0,
+      abs: Math.abs(Number(d.value) || 0)
+    }))
+    .sort((a,b) => b.abs - a.abs);
+
+  const maxAbs = d3.max(data, d => Math.abs(d.value)) || 1e-9;
+
+  const x = d3.scaleLinear()
+    .domain([-maxAbs, maxAbs])
+    .range([0, innerW]);
+
+  const y = d3.scaleBand()
+    .domain(data.map(d => d.feat))
+    .range([0, innerH])
+    .padding(0.22);
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+
+  // zero line
+  g.append("line")
+    .attr("class", "zero-line")
+    .attr("x1", x(0)).attr("x2", x(0))
+    .attr("y1", 0).attr("y2", innerH);
+
+  // bars
+  g.selectAll("rect")
+    .data(data)
+    .enter()
+    .append("rect")
+    .attr("x", d => x(Math.min(0, d.value)))
+    .attr("y", d => y(d.feat))
+    .attr("width", d => Math.abs(x(d.value) - x(0)))
+    .attr("height", y.bandwidth())
+    .attr("fill", d => d.value >= 0 ? "#10b981" : "#ef4444")
+    .attr("opacity", 0.85);
+
+  // value labels (optional, keep small)
+  g.selectAll("text.val")
+    .data(data)
+    .enter()
+    .append("text")
+    .attr("class", "val")
+    .attr("x", d => d.value >= 0 ? x(d.value) + 6 : x(d.value) - 6)
+    .attr("y", d => y(d.feat) + y.bandwidth()/2 + 4)
+    .attr("text-anchor", d => d.value >= 0 ? "start" : "end")
+    .attr("font-size", 11)
+    .attr("fill", "#374151")
+    .text(d => fmt(d.value));
+
+  // axes
+  g.append("g")
+    .attr("class", "axis")
+    .call(d3.axisLeft(y).tickSize(0))
+    .selectAll("text")
+    .attr("class", "mono")
+
+
+  g.append("g")
+    .attr("class", "axis")
+    .attr("transform", `translate(0,${innerH})`)
+    .call(d3.axisBottom(x).ticks(5));
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+(async function init() {
+  const files = await fetchSeeds();
+  const sel = document.getElementById("fileSel");
+  sel.innerHTML = files.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join("");
+
+  document.getElementById("loadBtn").addEventListener("click", loadSelected);
+
+  if (files.length) {
+    sel.value = files[0];
+    await loadSelected();
+  } else {
+    setStatus("No interpret json files found in runs/interpret");
+    side.innerHTML = `<div class="hint">No interpret json files found in <span class="mono">runs/interpret</span>.</div>`;
+  }
+})();
+</script>
+</body>
+</html>

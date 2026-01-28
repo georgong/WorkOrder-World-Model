@@ -3,7 +3,9 @@ from __future__ import annotations
 from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from collections import defaultdict
 
+import os
 import numpy as np
 import polars as pl
 import torch
@@ -19,12 +21,51 @@ from .feature_engineering import (
 )
 from .feature_schema import assignment_schema, district_schema, engineer_schema, task_schema #equipment_schema
 
+class PipelineLogger:
+    def __init__(self):
+        self.logs: Dict[str, List[str]] = defaultdict(list)
+
+    def log(self, pipeline: str, info: str) -> None:
+        self.logs[pipeline].append(info)
+
+    def dump(self, path: str | Path) -> None:
+        path = Path(path)
+
+        lines = []
+
+        for pipeline, infos in self.logs.items():
+            lines.append("=" * 14)
+            lines.append(f"(pipeline) {pipeline} :")
+            lines.append("=" * 14)
+
+            for info in infos:
+                lines.append(info)
+
+            lines.append("=" * 14)
+            lines.append("")
+
+        content = "\n".join(lines)
+
+        path.write_text(content, encoding="utf-8")
+
+
 
 DTYPE_MAP = {
     "Int64": pl.Int64,
     "Float64": pl.Float64,
     "string": pl.Utf8,
     "datetime64[ns]": pl.Datetime("ns"),
+}
+
+PERFIX_MAP = {
+    "tasks": "task_",
+    "assignments": "assign_",
+    "districts":"district_",
+    "departments":"departments_",
+    "task_statuses":"",
+    "task_types":"",
+    "regions":"",
+    "engineers":"eng_"
 }
 
 NULL_VALUES = ["", " ", "NA", "N/A", "NULL", "null", "None"]
@@ -41,7 +82,6 @@ TYPE_DIR_MAP = {
     "regions": "W6REGIONS",
 }
 
-# 你现在只给了这四个的 preprocessing
 preprocessing_dict = {
     "tasks": {"func": process_task_feature, "schema": task_schema},
     "assignments": {"func": process_assignment_feature, "schema": assignment_schema},
@@ -63,116 +103,28 @@ def _resolve_files(data_dir: Path, base: str) -> List[Path]:
         return [single]
     return []
 
+def assert_no_nulls(df: pl.DataFrame) -> None:
+    null_counts = df.select(pl.all().null_count())
+    bad_cols = [c for c in null_counts.columns if null_counts[c][0] > 0]
 
-def load_table(schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw") -> pl.DataFrame:
-    assert df_type in TYPE_DIR_MAP, f"df_type must be one of {sorted(TYPE_DIR_MAP.keys())} but got {df_type!r}"
+    if bad_cols:
+        raise ValueError(f"Null values detected in columns: {bad_cols}")
 
-    data_dir_p = Path(data_dir)
-    base = TYPE_DIR_MAP[df_type]
-    files = _resolve_files(data_dir_p, base)
-    if not files:
-        raise FileNotFoundError(f"No files found for {df_type=} under {data_dir_p} (expected {base}.csv or {base}-*.csv)")
+def filter_null_value(df: pl.DataFrame) -> pl.DataFrame:
+    return df.with_columns([
+        pl.when(pl.col(c).is_null())
+          .then(0)
+          .otherwise(pl.col(c))
+          .alias(c)
+        for c, dtype in df.schema.items()
+        if dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64,
+                     pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64,
+                     pl.Float32, pl.Float64)
+    ]) 
 
-    # schema path: schema["datasets"][df_type]["variables"]  (your earlier layout)
-    vars_meta = schema["datasets"][df_type]["variables"]
-    cols = list(vars_meta.keys())
 
-    pl_schema = {
-        col: DTYPE_MAP.get(meta.get("dtype", "string"), pl.Utf8)
-        for col, meta in vars_meta.items()
-    }
 
-    dfs: List[pl.DataFrame] = []
-    for f in files:
-        df = pl.read_csv(
-            f,
-            columns=cols,                     # only keep known columns
-            schema_overrides=pl_schema,        # enforce dtypes
-            null_values=NULL_VALUES,
-            ignore_errors=True,
-            truncate_ragged_lines=True,
-        )
 
-        # ensure all requested columns exist (some shards may miss a column)
-        missing = [c for c in cols if c not in df.columns]
-        if missing:
-            df = df.with_columns([pl.lit(None).cast(pl_schema[c]).alias(c) for c in missing]).select(cols)
-        else:
-            df = df.select(cols)
-
-        dfs.append(df)
-
-    df_concat = pl.concat(dfs, how="vertical", rechunk=True)
-    df_concat = preprocess_df(df_concat, vars_meta)
-    if df_type == "assignments":
-        df_concat = df_concat.with_columns(
-            (pl.col("FINISHTIME") - pl.col("STARTTIME")).alias("COMPLETIONTIME")
-        )
-
-        df_concat = df_concat.drop("FINISHTIME")
-    return df_concat
-
-def preprocess_df(df_concat, vars_meta):
-    '''
-    Preprocess the dataframe by removing outliers based on the metadata provided.
-    Support categorical, numeric, and datetime outlier types.
-    
-    Args:
-        df_concat (pl.DataFrame): The input dataframe to preprocess.
-        vars_meta (Dict[str, Dict[str, Any]]): Metadata containing outlier information for
-            each column.
-    Returns:
-        pl.DataFrame: The preprocessed dataframe with outliers removed.
-    '''
-
-    for col, meta in vars_meta.items():
-        outlier = meta.get("outlier", None)
-        outlier_type = meta.get("outlier_type", None)
-        if outlier is None or outlier_type is None:
-            continue
-
-        before_count = df_concat.height
-
-        if outlier_type == "categorical":
-            # Only keep rows where value is in outlier list
-            include_values = [x for x in outlier if x not in [None, "None"]]
-            df_concat = df_concat.filter(pl.col(col).is_in(include_values))
-            after_count = df_concat.height
-            print(f"Column '{col}' (categorical): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
-
-        elif outlier_type == "numeric":
-            lower, upper = outlier[0], outlier[1]
-            try:
-                lower_val = float(lower) if lower not in [None, "None"] else None
-                upper_val = float(upper) if upper not in [None, "None"] else None
-            except (ValueError, TypeError):
-                lower_val, upper_val = None, None
-
-            if lower_val is not None:
-                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
-            if upper_val is not None:
-                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
-
-            after_count = df_concat.height
-            print(f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
-        
-        elif outlier_type == "datetime":
-            lower, upper = outlier[0], outlier[1]
-            lower_val = pl.Series([lower]).str.to_datetime().to_list()[0] if lower not in [None, "None"] else None
-            upper_val = pl.Series([upper]).str.to_datetime().to_list()[0] if upper not in [None, "None"] else None
-
-            if lower_val is not None:
-                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
-            if upper_val is not None:
-                df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
-
-            after_count = df_concat.height
-            print(f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
-
-        else:
-            raise ValueError(f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
-
-    return df_concat
 
 
 # -------------------------
@@ -464,7 +416,7 @@ class GraphBuilder:
     def __init__(self, *, yaml: Dict[str, Any], data_dir: str = "data/raw") -> None:
         self.yaml = yaml
         self.data_dir = data_dir
-        self.logger = self.setup_logger()
+        self.logger = PipelineLogger()
 
         assert "datasets" in self.yaml, "YAML missing top-level 'datasets'"
         assert "mappings" in self.yaml, "YAML missing top-level 'mappings'"
@@ -472,13 +424,139 @@ class GraphBuilder:
         self.tables: Dict[str, pl.DataFrame] = {}
         self.data = HeteroData()
 
+    def _load_table(self, schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw") -> pl.DataFrame:
+        assert df_type in TYPE_DIR_MAP, f"df_type must be one of {sorted(TYPE_DIR_MAP.keys())} but got {df_type!r}"
+
+        data_dir_p = Path(data_dir)
+        base = TYPE_DIR_MAP[df_type]
+        files = _resolve_files(data_dir_p, base)
+        if not files:
+            raise FileNotFoundError(f"No files found for {df_type=} under {data_dir_p} (expected {base}.csv or {base}-*.csv)")
+
+        # schema path: schema["datasets"][df_type]["variables"]  (your earlier layout)
+        vars_meta = schema["datasets"][df_type]["variables"]
+        cols = list(vars_meta.keys())
+
+        pl_schema = {
+            col: DTYPE_MAP.get(meta.get("dtype", "string"), pl.Utf8)
+            for col, meta in vars_meta.items()
+        }
+
+        dfs: List[pl.DataFrame] = []
+        for f in files:
+            df = pl.read_csv(
+                f,
+                columns=cols,                     # only keep known columns
+                schema_overrides=pl_schema,        # enforce dtypes
+                null_values=NULL_VALUES,
+                ignore_errors=True,
+                truncate_ragged_lines=True,
+            )
+
+            # ensure all requested columns exist (some shards may miss a column)
+            missing = [c for c in cols if c not in df.columns]
+            if missing:
+                df = df.with_columns([pl.lit(None).cast(pl_schema[c]).alias(c) for c in missing]).select(cols)
+            else:
+                df = df.select(cols)
+
+            dfs.append(df)
+
+        df_concat = pl.concat(dfs, how="vertical", rechunk=True)
+        df_concat = self._preprocess_df(df_concat, vars_meta)
+        if df_type == "assignments":
+            df_concat = df_concat.with_columns(
+                (pl.col("FINISHTIME") - pl.col("STARTTIME")).alias("COMPLETIONTIME")
+            )
+
+            df_concat = df_concat.drop("FINISHTIME")
+            before = df_concat.height
+            cap = df_concat.select(pl.col("COMPLETIONTIME").quantile(0.99)).item()
+
+            df_concat = df_concat.with_columns(
+                pl.when(pl.col("COMPLETIONTIME") > cap)
+                .then(cap)
+                .otherwise(pl.col("COMPLETIONTIME"))
+                .alias("COMPLETIONTIME")
+            )
+
+            after = df_concat.height
+            dropped = before - after
+            print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.99)={cap}")
+        return df_concat
+
+    def _preprocess_df(self, df_concat, vars_meta):
+        '''
+        Preprocess the dataframe by removing outliers based on the metadata provided.
+        Support categorical, numeric, and datetime outlier types.
+        
+        Args:
+            df_concat (pl.DataFrame): The input dataframe to preprocess.
+            vars_meta (Dict[str, Dict[str, Any]]): Metadata containing outlier information for
+                each column.
+        Returns:
+            pl.DataFrame: The preprocessed dataframe with outliers removed.
+        '''
+
+        for col, meta in vars_meta.items():
+            outlier = meta.get("outlier", None)
+            outlier_type = meta.get("outlier_type", None)
+            if outlier is None or outlier_type is None:
+                continue
+
+            before_count = df_concat.height
+
+            if outlier_type == "categorical":
+                # Only keep rows where value is in outlier list
+                include_values = [x for x in outlier if x not in [None, "None"]]
+                df_concat = df_concat.filter(pl.col(col).is_in(include_values))
+                after_count = df_concat.height
+                print(f"Column '{col}' (categorical): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+
+            elif outlier_type == "numeric":
+                lower, upper = outlier[0], outlier[1]
+                try:
+                    lower_val = float(lower) if lower not in [None, "None"] else None
+                    upper_val = float(upper) if upper not in [None, "None"] else None
+                except (ValueError, TypeError):
+                    lower_val, upper_val = None, None
+
+                if lower_val is not None:
+                    df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
+                if upper_val is not None:
+                    df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
+
+                after_count = df_concat.height
+                self.logger.log("filter_row",f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+                print(f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+            
+            elif outlier_type == "datetime":
+                lower, upper = outlier[0], outlier[1]
+                lower_val = pl.Series([lower]).str.to_datetime().to_list()[0] if lower not in [None, "None"] else None
+                upper_val = pl.Series([upper]).str.to_datetime().to_list()[0] if upper not in [None, "None"] else None
+
+                if lower_val is not None:
+                    df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) >= lower_val))
+                if upper_val is not None:
+                    df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
+
+                after_count = df_concat.height
+                self.logger.log("filter_row",f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+                print(f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
+
+            else:
+                self.logger.log("filter_row",f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
+                raise ValueError(f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
+
+        return df_concat
+
     def setup_logger(self) -> Logger:
         return Logger(__name__)
 
     def _load_all_tables(self) -> None:
         for t in self.yaml["mappings"].keys():
             assert t in self.yaml["datasets"], f"mappings contains {t!r} but datasets missing it"
-            self.tables[t] = load_table(self.yaml, t, data_dir=self.data_dir)
+            self.tables[t] = self._load_table(self.yaml, t, data_dir=self.data_dir)
 
     def _build_nodes_one(self, node_type: str) -> None:
         cfg = self.yaml["mappings"][node_type]
@@ -496,15 +574,37 @@ class GraphBuilder:
             fn = preprocessing_dict[node_type]["func"]
             sch = preprocessing_dict[node_type]["schema"]
             feat_obj = fn(df, sch)  # user-defined
+            vars_cfg = self.yaml["datasets"][node_type]["variables"]
+            key_cols = [PERFIX_MAP[node_type] + c for c, info in vars_cfg.items() if bool((info or {}).get("key", False))]
+            feat_obj = feat_obj.drop(key_cols)
+            feat_obj.select(pl.all().null_count())
+            feat_obj = filter_null_value(feat_obj)
+            assert_no_nulls(feat_obj)
         else:
             # fallback: use numeric "node" trait columns from yaml
             node_cols, _ = get_trait_cols(self.yaml, node_type)
-            numeric_cols = [c for c in node_cols if c in df.columns and df.schema[c] in (pl.Int64, pl.Float64)]
-            if not numeric_cols:
-                # last fallback: dummy 1-dim feature
-                feat_obj = torch.ones((df.height, 1), dtype=torch.float)
+
+            vars_cfg = self.yaml["datasets"][node_type]["variables"]
+            key_cols = [c for c, info in vars_cfg.items() if bool((info or {}).get("key", False))]
+
+            # 只在原 df 中的 numeric
+            numeric_cols = [
+                c for c in node_cols
+                if c in df.columns and df.schema[c] in (pl.Int64, pl.Float64)
+            ]
+
+            # 去掉 key 列
+            numeric_feat_cols = [c for c in numeric_cols if c not in key_cols]
+
+            if not numeric_feat_cols:
+                # 全是 key，或者根本没有数值特征
+                feat_obj = pl.DataFrame({"__dummy__": pl.Series([1.0] * df.height)})
             else:
-                feat_obj = df.select(numeric_cols).fill_null(0)
+                feat_obj = df.select(numeric_feat_cols).fill_null(0)
+                feat_obj = filter_null_value(feat_obj)
+                assert_no_nulls(feat_obj)
+        
+
 
         X_row = _to_float_tensor(feat_obj)
         X_row = _ensure_2d(X_row, f"{node_type} row-features")
@@ -525,9 +625,17 @@ class GraphBuilder:
         self.data[node_type].num_nodes = len(node_ids)
         self.data[node_type].attr_name = feat_obj.columns
         attr_name = self.data[node_type].attr_name
+        vars_cfg = self.yaml["datasets"][node_type]["variables"]
+        mask_cols = [c for c, info in vars_cfg.items() if bool((info or {}).get("mask", False))]
+        self.data[node_type].mask_cols = mask_cols
 
         ### if the assign_COMPLETIONTIME: target in the attr_name, select it and make it as y
         X = X_node
+        ### Nan Value Check
+        bad = torch.isnan(X) | torch.isinf(X)
+        if bad.any():
+            raise Exception(f"{node_type}: tensor has NaN/Inf")
+        
         target_col = "assign_COMPLETIONTIME"
 
         if target_col in attr_name:
@@ -553,9 +661,7 @@ class GraphBuilder:
 
         # 5) store masks (which columns are hidden at prediction time) as metadata lists
         # (PyG doesn't care, but you do.)
-        vars_cfg = self.yaml["datasets"][node_type]["variables"]
-        mask_cols = [c for c, info in vars_cfg.items() if bool((info or {}).get("mask", False))]
-        self.data[node_type].mask_cols = mask_cols
+
         if node_type == "assignments":
             mask_cols.append("COMPLETIONTIME")
 
@@ -608,11 +714,47 @@ class GraphBuilder:
                 # reverse edge (optional but usually helpful)
                 rev_rel = (dst_type, f"rev_{edge_type}", src_type)
                 self.data[rev_rel].edge_index = edge_index.flip(0)
+    
+    def _build_edges_by_shared_edge_trait(self):
+        for node_type, node_cfg in self.yaml["mappings"].items():
+            df = self.tables[node_type]
+            vars_cfg = self.yaml["datasets"][node_type]["variables"]
+            entity_key = node_cfg["entity_key"]
+            keys_sorted = self.data[node_type].__key_index
+
+            for col, meta in vars_cfg.items():
+                if meta.get("trait_type") != "edge":
+                    continue
+
+                # Optionally, transform value (e.g., extract month from datetime)
+                if meta.get("dtype", "").startswith("datetime"):
+                    group_vals = df[col].dt.month()
+                else:
+                    group_vals = df[col]
+
+                # Group by the edge variable
+                groups = df.with_columns(group_vals.alias("__group_val")).groupby("__group_val")
+
+                for group_val, group_df in groups:
+                    node_ids = group_df[entity_key].to_list()
+                    # Create all pairs (i, j) where i != j
+                    for i in range(len(node_ids)):
+                        for j in range(i + 1, len(node_ids)):
+                            src_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[i])["__idx"][0]
+                            dst_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[j])["__idx"][0]
+                            # Add edge (src_idx, dst_idx) and (dst_idx, src_idx) if undirected
+
+                    # Collect all edges for this group and add to self.data
+
+                # You may want to batch this for efficiency
+
+                # Store as a new edge type, e.g., (node_type, f"shared_{col}", node_type)
 
     def build(self) -> HeteroData:
         self._load_all_tables()
         self._build_all_nodes()
         self._build_edges()
+
 
         # sanity checks
         for ntype in self.data.node_types:
@@ -631,8 +773,22 @@ class GraphBuilder:
                 "This often means your entity_key mapping differs from table keys."
             )
 
-        # clean temporary fields if you don't want them
-        # (but keeping them is super useful for debugging)
+        for ntype in self.data.node_types:
+            self.logger.log(
+                "graph_build_up",
+                f"{ntype}: feature_shape={tuple(self.data[ntype].x.shape)}, num_nodes={len(self.data[ntype].node_ids)}"
+            )
+            print(ntype, self.data[ntype].x.shape, len(self.data[ntype].node_ids))
+
+        for etype in self.data.edge_types[:10]:
+            self.logger.log(
+                "graph_build_up",
+                f"{etype}: feature_shape={self.data[etype].edge_index.shape}"
+            )
+            print(etype, self.data[etype].edge_index.shape)
+
+
+        self.logger.dump("pipeline_log.txt")
         return self.data
     
 
@@ -643,17 +799,14 @@ class GraphBuilder:
 def _demo_test(schema: Dict[str, Any]) -> None:
     gb = GraphBuilder(yaml=schema, data_dir="data/raw")
     g = gb.build()
-    print(g)
-    print(g["tasks"].attr_name)
 
     # quick peek
-    for ntype in g.node_types:
-        print(ntype, g[ntype].x.shape, len(g[ntype].node_ids))
 
-    for etype in g.edge_types[:10]:
-        print(etype, g[etype].edge_index.shape)
-
-    torch.save(g, "data/graph/sdge.pt")
+    # torch.save(g, "data/graph/sdge.pt")
+    
+    out_put_dir = "data/graph"
+    os.makedirs(out_put_dir, exist_ok=True)
+    torch.save(g, os.path.join(out_put_dir, "sdge.pt"))
 
 
 if __name__ == "__main__":
