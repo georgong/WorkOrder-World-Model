@@ -121,3 +121,6 @@ def graph_ego(
         seed=seed,
         use_pos_if_exists=use_pos_if_exists,
     )
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server.app:app", host="127.0.0.1", port=8000, reload=True)
