@@ -18,25 +18,110 @@
     .edge { stroke: #bbb; stroke-opacity: 0.6; }
     .tooltip {
       position: fixed;
-      max-width: 420px;
+      max-width: 520px;          /* 原来 420，略微加宽 */
+      max-height: 380px;         /* 新增：限制高度 */
+      overflow: auto;            /* 新增：内部滚动 */
       background: white;
       border: 1px solid #ddd;
       border-radius: 8px;
       padding: 10px;
       box-shadow: 0 6px 20px rgba(0,0,0,0.12);
       font-size: 12px;
-      pointer-events: none;
+      line-height: 1.35;         /* 新增：更舒服 */
+      pointer-events: auto;
       opacity: 0;
       transition: opacity 80ms linear;
       z-index: 9999;
     }
-    .tooltip .title { font-weight: 600; margin-bottom: 6px; }
-    .tooltip table { border-collapse: collapse; width: 100%; }
-    .tooltip td { padding: 2px 6px; vertical-align: top; border-top: 1px solid #f1f1f1; }
-    .tooltip td.key { color: #333; width: 38%; word-break: break-word; }
-    .tooltip td.val { color: #111; word-break: break-word; }
-    .muted { color: #777; }
-    input { width: 90px; }
+
+    /* 标题 */
+    .tooltip .title {
+      font-weight: 600;
+      font-size: 14px;           /* 稍微突出 */
+      margin-bottom: 4px;
+    }
+
+    /* type:id 那一行 */
+    .tooltip .meta {
+      margin-bottom: 8px;
+      color: #777;
+      font-size: 12px;
+    }
+
+    /* 表格 */
+    .tooltip table {
+      border-collapse: collapse;
+      width: 100%;
+      table-layout: fixed;       /* 关键：防止被长字符串撑爆 */
+    }
+
+    .tooltip td {
+      padding: 4px 6px;
+      vertical-align: top;
+      border-top: 1px solid #f1f1f1;
+    }
+
+    .tooltip td.key {
+      color: #333;
+      width: 32%;                /* 原来 38，略收紧 */
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .tooltip td.val {
+      color: #111;
+      width: 68%;
+      word-break: break-word;
+    }
+
+    /* JSON / object / array 显示块 */
+    .tooltip .code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #f7f7f7;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin-top: 4px;
+    }
+
+    /* list · len=xxx 这种小标签 */
+    .tooltip .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: #fafafa;
+      border: 1px solid #e6e6e6;
+      color: #555;
+      margin-bottom: 4px;
+    }
+
+    .tooltip .scrollbox {
+      max-height: 140px;
+      overflow: auto;
+      background: #f7f7f7;
+      border: 1px solid #eee;
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin-top: 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    /* 通用 muted */
+    .muted {
+      color: #777;
+    }
+
+    /* 顶部输入框 */
+    input {
+      width: 90px;
+    }
   </style>
 </head>
 <body>
@@ -59,6 +144,8 @@
     let controller = null;
     let hoverTimer = null;
     let lastHoverKey = null;
+    let pinned = false;
+    let pinnedKey = null;
 
     function setStatus(s) { statusEl.textContent = s; }
 
@@ -85,6 +172,130 @@
     }
 
     function keyOf(d) { return `${d.type}:${d.id}`; }
+
+    function unpinTooltip() {
+      pinned = false;
+      pinnedKey = null;
+      if (controller) controller.abort();
+      hideTooltip();
+    }
+
+    async function loadAndShowNodeTooltip(d, x, y) {
+      // 先显示 loading
+      showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">Loading...</div>`);
+
+      // 取消上一个请求
+      if (controller) controller.abort();
+      controller = new AbortController();
+
+      try {
+        const r = await fetch(`/node/${encodeURIComponent(d.type)}/${d.id}`, { signal: controller.signal });
+        if (!r.ok) throw new Error("node fetch failed");
+        const j = await r.json();
+
+        // 如果已经换 pin 了，就别更新旧的
+        if (pinned && pinnedKey !== keyOf(d)) return;
+
+        if (j.error) {
+          showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">${j.error}</div>`);
+          return;
+        }
+
+        const rows = Object.entries(j.attrs || {})
+          .filter(([k]) => !shouldHideKey(k))
+          .slice(0, 60)
+          .map(([k, v]) => `
+            <tr>
+              <td class="key">${k}</td>
+              <td class="val">${summarizeValue(v)}</td>
+            </tr>
+          `)
+          .join("");
+
+        const html =
+          `<div class="title">${j.label || d.label}</div>` +
+          `<div class="meta">${j.type}:${j.id}</div>` +
+          `<table>${rows || `<tr><td class="muted">No attrs</td><td></td></tr>`}</table>`;
+
+        showTooltip(x, y, html);
+      } catch (e) {
+        if (e.name === "AbortError") return;
+        showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">Error: ${e}</div>`);
+      }
+    }
+
+    function pinTooltipForNode(event, d) {
+      pinned = true;
+      pinnedKey = keyOf(d);
+
+      // 用点击位置固定 tooltip
+      const x = event.clientX;
+      const y = event.clientY;
+
+      loadAndShowNodeTooltip(d, x, y);
+    }
+
+    function summarizeValue(v) {
+      if (v == null) return `<span class="muted">null</span>`;
+
+      // 后端那种 {"__list__": true, "len": 10941}
+      if (typeof v === "object" && v.__list__ && typeof v.len === "number") {
+        return `<span class="pill">list · len=${v.len}</span>`;
+      }
+
+      if (Array.isArray(v)) {
+        const n = v.length;
+
+        // 完整内容：每行一个，配合 scrollbox 滚动查看
+        const full = v.map(x => String(x)).join("\n");
+
+        // 太长就截断一下避免 tooltip 过大（可自行调大/删掉）
+        const fullTrunc = full.length > 20000 ? full.slice(0, 20000) + "\n…" : full;
+
+        return `
+          <div class="pill">list · len=${n}</div>
+          <div class="scrollbox">${fullTrunc}</div>
+        `;
+      }
+
+      // Tensor placeholder
+      if (typeof v === "object" && v.__tensor__) {
+        const dtype = v.dtype ? String(v.dtype) : "tensor";
+        const shapeArr = Array.isArray(v.shape) ? v.shape : [];
+        const shapeStr = shapeArr.length ? `[${shapeArr.join(", ")}]` : "[]";
+
+        const numel = (typeof v.numel === "number") ? v.numel : null;
+
+        function humanInt(n) {
+          if (n == null) return "";
+          if (n >= 1e9) return (n / 1e9).toFixed(2).replace(/\.00$/, "") + "B";
+          if (n >= 1e6) return (n / 1e6).toFixed(2).replace(/\.00$/, "") + "M";
+          if (n >= 1e3) return (n / 1e3).toFixed(2).replace(/\.00$/, "") + "K";
+          return String(n);
+        }
+
+        const numelStr = numel == null ? "" : `${humanInt(numel)} (${numel})`;
+
+        return `
+          <div class="pill">${dtype}</div>
+          <div class="code">shape: ${shapeStr}${numel == null ? "" : `\nnumel: ${numelStr}`}</div>
+        `;
+      }
+
+      if (typeof v === "object") {
+        let s = JSON.stringify(v, null, 2);
+        if (s.length > 800) s = s.slice(0, 800) + "\n…";
+        return `<div class="code">${s}</div>`;
+      }
+
+      let s = String(v);
+      if (s.length > 220) s = s.slice(0, 220) + "…";
+      return s;
+    }
+
+    function shouldHideKey(k) {
+      return ["node_ids", "mask_cols"].includes(k);
+    }
 
     function render(summary) {
       svg.selectAll("*").remove();
@@ -165,84 +376,108 @@
             .attr("y", d => d.y);
         });
 
-      node
-        .on("mouseenter", (event, d) => {
-          // debounce hover requests
-          if (hoverTimer) clearTimeout(hoverTimer);
+    node
+      .on("mouseenter", (event, d) => {
+        if (pinned) return;
+        if (hoverTimer) clearTimeout(hoverTimer);
 
-          const hoverKey = keyOf(d);
-          lastHoverKey = hoverKey;
+        const hoverKey = keyOf(d);
+        lastHoverKey = hoverKey;
 
-          hoverTimer = setTimeout(async () => {
-            // cancel previous request
-            if (controller) controller.abort();
-            controller = new AbortController();
-
-            const x = event.clientX;
-            const y = event.clientY;
-
-            showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">Loading...</div>`);
-
-            try {
-              const r = await fetch(`/node/${encodeURIComponent(d.type)}/${d.id}`, { signal: controller.signal });
-              if (!r.ok) throw new Error("node fetch failed");
-              const j = await r.json();
-
-              // If user moved away, ignore
-              if (lastHoverKey !== hoverKey) return;
-
-              if (j.error) {
-                showTooltip(x, y, `<div class="title">${d.label}</div><div class="muted">${j.error}</div>`);
-                return;
-              }
-
-              const rows = Object.entries(j.attrs || {})
-                .slice(0, 60)
-                .map(([k, v]) => {
-                  let vv = (typeof v === "object") ? JSON.stringify(v) : String(v);
-                  if (vv.length > 180) vv = vv.slice(0, 180) + "...";
-                  return `<tr><td class="key">${k}</td><td class="val">${vv}</td></tr>`;
-                })
-                .join("");
-
-              const html =
-                `<div class="title">${j.label || d.label}</div>` +
-                `<div class="muted">${j.type}:${j.id}</div>` +
-                `<table>${rows || `<tr><td class="muted">No attrs</td><td></td></tr>`}</table>`;
-
-              showTooltip(x, y, html);
-            } catch (e) {
-              if (e.name === "AbortError") return;
-              showTooltip(event.clientX, event.clientY, `<div class="title">${d.label}</div><div class="muted">Error: ${e}</div>`);
-            }
-          }, 80);
-        })
-        .on("mousemove", (event) => {
-          // keep tooltip near cursor
-          tooltip.style.left = (event.clientX + 12) + "px";
-          tooltip.style.top = (event.clientY + 12) + "px";
-        })
-        .on("mouseleave", () => {
-          lastHoverKey = null;
-          if (hoverTimer) clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(async () => {
           if (controller) controller.abort();
-          hideTooltip();
-        });
+          controller = new AbortController();
 
-      // drag
-      node.call(d3.drag()
-        .on("start", (event, d) => {
-          if (!event.active) sim.alphaTarget(0.2).restart();
-          d.fx = d.x; d.fy = d.y;
-        })
-        .on("drag", (event, d) => {
-          d.fx = event.x; d.fy = event.y;
-        })
-        .on("end", (event, d) => {
-          if (!event.active) sim.alphaTarget(0);
-          d.fx = null; d.fy = null;
-        })
-      );
+          const x = event.clientX;
+          const y = event.clientY;
+
+          showTooltip(
+            x,
+            y,
+            `<div class="title">${d.label}</div><div class="muted">Loading…</div>`
+          );
+
+          try {
+            const r = await fetch(
+              `/node/${encodeURIComponent(d.type)}/${d.id}`,
+              { signal: controller.signal }
+            );
+            if (!r.ok) throw new Error("node fetch failed");
+
+            const j = await r.json();
+            if (lastHoverKey !== hoverKey) return;
+
+            if (j.error) {
+              showTooltip(
+                x,
+                y,
+                `<div class="title">${d.label}</div><div class="muted">${j.error}</div>`
+              );
+              return;
+            }
+
+            const rows = Object.entries(j.attrs || {})
+              .filter(([k]) => !shouldHideKey(k))
+              .slice(0, 40)
+              .map(([k, v]) => `
+                <tr>
+                  <td class="key">${k}</td>
+                  <td class="val">${summarizeValue(v)}</td>
+                </tr>
+              `)
+              .join("");
+
+            const html =
+              `<div class="title">${j.label || d.label}</div>` +
+              `<div class="meta">${j.type}:${j.id}</div>` +
+              `<table>${rows || `<tr><td class="muted">No attrs</td><td></td></tr>`}</table>`;
+
+            showTooltip(x, y, html);
+          } catch (e) {
+            if (e.name === "AbortError") return;
+            showTooltip(
+              event.clientX,
+              event.clientY,
+              `<div class="title">${d.label}</div><div class="muted">Error: ${e}</div>`
+            );
+          }
+        }, 80);
+      })
+      .on("mousemove", (event) => {
+        if (pinned) return;
+        tooltip.style.left = (event.clientX + 12) + "px";
+        tooltip.style.top = (event.clientY + 12) + "px";
+      })
+      .on("mouseleave", () => {
+        if (pinned) return;
+        lastHoverKey = null;
+        if (hoverTimer) clearTimeout(hoverTimer);
+        if (controller) controller.abort();
+        hideTooltip();
+      })
+      .on("click", (event, d) => {
+        event.stopPropagation(); // 防止触发“点空白关闭”
+        if (pinned && pinnedKey === keyOf(d)) {
+          unpinTooltip();
+          return;
+        }
+        pinTooltipForNode(event, d);
+      });
+
+    // drag（这一段保持你原来的）
+    node.call(d3.drag()
+      .on("start", (event, d) => {
+        if (!event.active) sim.alphaTarget(0.2).restart();
+        d.fx = d.x; d.fy = d.y;
+      })
+      .on("drag", (event, d) => {
+        d.fx = event.x; d.fy = event.y;
+      })
+      .on("end", (event, d) => {
+        if (!event.active) sim.alphaTarget(0);
+        d.fx = null; d.fy = null;
+      })
+    );
     }
 
     async function main() {
@@ -255,6 +490,15 @@
       }
     }
     
+    // 点击 tooltip 自己，不关闭
+    tooltip.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+
+    // 点击页面任意空白，关闭 pinned tooltip
+    document.addEventListener("click", () => {
+      if (pinned) unpinTooltip();
+    });
 
     document.getElementById("reload").addEventListener("click", main);
     main();
