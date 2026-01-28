@@ -9,7 +9,136 @@ This project constructs a heterogeneous graph from tabular work-order data (task
 ## Project Structure
 
 ```
-
+├── configs
+│   ├── data.yaml
+│   └── graph.yaml
+├── data
+│   ├── analysis
+│   │   ├── connectivity.count.csv
+│   │   └── connectivity.ratio.csv
+│   ├── features_table
+│   │   ├── assignment_feat_clean.parquet
+│   │   ├── district_feat_clean.parquet
+│   │   ├── engineer_feat_clean.parquet
+│   │   └── task_feat_clean.parquet
+│   ├── graph
+│   │   ├── hetero_sdge.pt
+│   │   ├── sdge.pt
+│   │   └── sdge_pruned.pt
+│   ├── processed
+│   │   ├── assignments_processed.parquet
+│   │   ├── districts_processed.parquet
+│   │   ├── engineers_processed.parquet
+│   │   └── tasks_processed.parquet
+│   └── raw
+│       ├── W6ASSIGNMENTS-0.csv
+│       ├── W6ASSIGNMENTS-1.csv
+│       ├── W6ASSIGNMENTS-10.csv
+│       ├── W6ASSIGNMENTS-11.csv
+│       ├── W6ASSIGNMENTS-12.csv
+│       ├── W6ASSIGNMENTS-13.csv
+│       ├── W6ASSIGNMENTS-14.csv
+│       ├── W6ASSIGNMENTS-15.csv
+│       ├── W6ASSIGNMENTS-16.csv
+│       ├── W6ASSIGNMENTS-17.csv
+│       ├── W6ASSIGNMENTS-18.csv
+│       ├── W6ASSIGNMENTS-19.csv
+│       ├── W6ASSIGNMENTS-2.csv
+│       ├── W6ASSIGNMENTS-20.csv
+│       ├── W6ASSIGNMENTS-21.csv
+│       ├── W6ASSIGNMENTS-22.csv
+│       ├── W6ASSIGNMENTS-3.csv
+│       ├── W6ASSIGNMENTS-4.csv
+│       ├── W6ASSIGNMENTS-5.csv
+│       ├── W6ASSIGNMENTS-6.csv
+│       ├── W6ASSIGNMENTS-7.csv
+│       ├── W6ASSIGNMENTS-8.csv
+│       ├── W6ASSIGNMENTS-9.csv
+│       ├── W6DEPARTMENT-0.csv
+│       ├── W6DISTRICTS-0.csv
+│       ├── W6ENGINEERS-0.csv
+│       ├── W6EQUIPMENT-0.csv
+│       ├── W6EQUIPMENT-1.csv
+│       ├── W6REGIONS-0.csv
+│       ├── W6TASKS-0.csv
+│       ├── W6TASKS-1.csv
+│       ├── W6TASKS-10.csv
+│       ├── W6TASKS-11.csv
+│       ├── W6TASKS-12.csv
+│       ├── W6TASKS-13.csv
+│       ├── W6TASKS-14.csv
+│       ├── W6TASKS-15.csv
+│       ├── W6TASKS-16.csv
+│       ├── W6TASKS-17.csv
+│       ├── W6TASKS-18.csv
+│       ├── W6TASKS-19.csv
+│       ├── W6TASKS-2.csv
+│       ├── W6TASKS-20.csv
+│       ├── W6TASKS-21.csv
+│       ├── W6TASKS-3.csv
+│       ├── W6TASKS-4.csv
+│       ├── W6TASKS-5.csv
+│       ├── W6TASKS-6.csv
+│       ├── W6TASKS-7.csv
+│       ├── W6TASKS-8.csv
+│       ├── W6TASKS-9.csv
+│       ├── W6TASK_STATUSES-0.csv
+│       └── W6TASK_TYPES-0.csv
+├── dockerfile
+├── docs
+│   └── data_schema.md
+├── eda_notbook.ipynb
+├── interpret_server
+│   ├── app.py
+│   └── static
+│       └── index.html
+├── pipeline_log.txt
+├── processing_notebook.ipynb
+├── readme.md
+├── requirements.txt
+├── results
+├── scripts
+│   ├── generate_graph.sh
+│   ├── graph_eda.sh
+│   ├── train_gnn.sh
+│   ├── visualize_graph.sh
+│   └── visualize_interpretation.sh
+├── server
+│   ├── app.py
+│   ├── static
+│   │   └── index.html
+│   └── utils.py
+├── src
+│   ├── layer
+│   ├── model
+│   │   └── gnn.py
+│   ├── process
+│   │   ├── construct_baseline_graph.py
+│   │   ├── construct_graph.py
+│   │   ├── feature_engineering.py
+│   │   ├── feature_schema.py
+│   │   ├── graph_builder.py
+│   │   ├── graph_connectivity.py
+│   │   ├── prune_graph.py
+│   │   ├── structure_graph_builder.py
+│   │   └── utils
+│   │       ├── convert_columns.py
+│   │       ├── filter_raw_data.py
+│   │       └── inspect_relation.py
+│   └── runner
+│       ├── eda.py
+│       ├── eval.py
+│       ├── interpret_subgraph.py
+│       ├── run_gnn.py
+│       ├── train.py
+│       └── train_kfold.py
+├── test
+│   ├── __init__.py
+│   └── test_graph_construction.py
+├── util_function
+│   ├── build_schema_from_wow.py
+│   ├── how_far_we_go.py
+│   └── update_ouliter.py
 
 
 ```
