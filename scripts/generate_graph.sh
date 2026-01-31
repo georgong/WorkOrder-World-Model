@@ -1,0 +1,1 @@
+python -m src.process.structure_graph_builder

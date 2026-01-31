@@ -1,0 +1,1 @@
+python -m src.process.graph_connectivity

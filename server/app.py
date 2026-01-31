@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .utils import build_graph_summary, get_node_payload
 
-GRAPH_PATH = Path("data/graph/sdge.pt")
+GRAPH_PATH = Path("data/graph/sdge_pruned.pt")
 STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(title="SDGE HeteroGraph Server", version="0.5")
@@ -121,3 +121,6 @@ def graph_ego(
         seed=seed,
         use_pos_if_exists=use_pos_if_exists,
     )
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("server.app:app", host="127.0.0.1", port=8000, reload=True)

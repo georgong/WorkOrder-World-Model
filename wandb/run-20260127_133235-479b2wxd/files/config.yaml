@@ -1,0 +1,78 @@
+_wandb:
+    value:
+        cli_version: 0.20.1
+        m: []
+        python_version: 3.12.7
+        t:
+            "1":
+                - 1
+                - 11
+                - 49
+                - 77
+                - 105
+            "2":
+                - 1
+                - 11
+                - 49
+                - 77
+                - 105
+            "3":
+                - 13
+                - 16
+                - 55
+                - 61
+            "4": 3.12.7
+            "5": 0.20.1
+            "6": 4.53.0.dev0
+            "10":
+                - 20
+            "12": 0.20.1
+            "13": darwin-arm64
+batch_size:
+    value: 256
+degree_mode:
+    value: in
+device:
+    value: auto
+epochs:
+    value: 2
+eval_batch_size:
+    value: 256
+fold:
+    value: 0
+fold_train_n:
+    value: 3945609
+fold_val_n:
+    value: 986403
+hidden:
+    value: 64
+k_folds:
+    value: 5
+layers:
+    value: 2
+lr:
+    value: 0.001
+min_degree:
+    value: 1
+num_neighbors:
+    value: 10
+pt:
+    value: data/graph/sdge.pt
+save_dir:
+    value: runs/checkpoints_kfold
+save_every:
+    value: 1
+seed:
+    value: 42
+seeds:
+    value: null
+seeds_file:
+    value: null
+target:
+    value: assignments
+wandb_project:
+    value: scheduling_world_model
+wandb_run_name:
+    value: null
+wd:
+    value: 1e-05
