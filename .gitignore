@@ -69,3 +69,4 @@ data explore/
 *.7z
 *.zip.spyproject
 pipeline_log.txt
+/wandb
