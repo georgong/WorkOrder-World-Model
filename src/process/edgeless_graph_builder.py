@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from logging import Logger
 from pathlib import Path
-import random
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+import random 
+from itertools import combinations
 
 import os
 import numpy as np
@@ -92,8 +93,8 @@ preprocessing_dict = {
 }
 
 # This is used in _build_edges_by_shared_edge_trait() to avoid memory explosion for very large groups
-MAX_NODES_PER_GROUP = 2000
-MAX_EDGES_PER_GROUP = 10000
+# MAX_NODES_PER_GROUP = 2000
+# MAX_EDGES_PER_GROUP = 10000
 
 
 # -------------------------
@@ -763,7 +764,6 @@ class GraphBuilder:
                     continue
 
                 edge_construct = meta.get("edge_construct", None)
-                dtype = meta.get("dtype", "")
 
                 edge_group = meta.get("edge_group", "identity")  # default to identity
                 extractor = group_extractors.get(edge_group, group_identity)
@@ -782,147 +782,19 @@ class GraphBuilder:
                 
                 # Collect edges
                 if edge_construct == "context_node":
-                    self._build_shared_edges_context_node(
+                    CustomEdgeConstructor.build_shared_edges_context_node(
                         groups, entity_key, id_to_idx, node_type, group_label, data_store=self.data
                     )
                     ...
                 elif edge_construct == "neighbor":
-                    self._build_shared_edges_random_k_neighbors(
-                        groups, entity_key, id_to_idx, node_type, k=meta.get("neighbor_k", 3), data_store=self.data
+                    CustomEdgeConstructor.build_shared_edges_random_k_neighbors(
+                        groups, entity_key, id_to_idx, node_type, k=meta.get("neighbor_k", 3), max_nodes_per_group=self.MAX_NODES_PER_GROUP, data_store=self.data
                     )
                 else:
-                    self._build_shared_edges_pairwise(
+                    CustomEdgeConstructor.build_shared_edges_pairwise(
                         groups, entity_key, id_to_idx, node_type,  max_edges_per_group=self.MAX_EDGES_PER_GROUP, data_store=self.data
                     )
                     ...
-
-    def _build_shared_edges_random_k_neighbors(
-        self, groups, entity_key, id_to_idx, node_type, k, data_store
-    ):
-        src_indices = []
-        dst_indices = []
-
-        for group in groups.iter_rows(named=True):
-            node_ids = group[entity_key]
-            if not isinstance(node_ids, list):
-                node_ids = [node_ids]
-            idxs = [id_to_idx[nid] for nid in node_ids if nid in id_to_idx]
-            n = len(idxs)
-            if n < 2:
-                continue
-            
-            if n > self.MAX_NODES_PER_GROUP:
-                idxs = random.sample(idxs, self.MAX_NODES_PER_GROUP)
-                n = len(idxs)
-            idxs_arr = np.array(idxs)
-            
-            # For each node, connect to k nearest neighbors (by index order)
-            print(len(idxs))
-            for i, idx in enumerate(idxs):
-                # Exclude self by masking
-                mask = np.ones(n, dtype=bool)
-                mask[i] = False
-                possible_neighbors = idxs_arr[mask]
-                if len(possible_neighbors) > k:
-                    sampled = np.random.choice(possible_neighbors, k, replace=False)
-                else:
-                    sampled = possible_neighbors
-                src_indices.extend([idx] * len(sampled))
-                dst_indices.extend(sampled.tolist())
-                if i % 1000 == 0:
-                    print(f"Processed {i} nodes in group {group['__group_val']}")
-
-        if src_indices and dst_indices:
-            edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
-            edge_type = "neighbors_assignment"
-            rel = (node_type, edge_type, node_type)
-            data_store[rel].edge_index = edge_index
-            rev_rel = (node_type, f"rev_{edge_type}", node_type)
-            data_store[rev_rel].edge_index = edge_index.flip(0)
-            print(f"Added random {k} neighbors edge_type {rel} with {edge_index.shape[1]} edges.")
-    
-    def _build_shared_edges_pairwise(
-        self, groups, entity_key, id_to_idx, node_type, max_edges_per_group, data_store
-    ):
-
-        src_indices = []
-        dst_indices = []
-
-        for group in groups.iter_rows(named=True):
-            node_ids = group[entity_key]
-            if not isinstance(node_ids, list):
-                node_ids = [node_ids]
-            idxs = [id_to_idx[nid] for nid in node_ids if nid in id_to_idx]
-            n = len(idxs)
-            if n < 2:
-                continue
-
-            num_possible_pairs = n * (n - 1) // 2
-            if num_possible_pairs > max_edges_per_group:
-                sampled_pairs = set()
-                while len(sampled_pairs) < max_edges_per_group:
-                    i, j = sorted(random.sample(range(n), 2))
-                    sampled_pairs.add((idxs[i], idxs[j]))
-                for i, j in sampled_pairs:
-                    src_indices.append(i)
-                    dst_indices.append(j)
-            else:
-                for i in range(n):
-                    for j in range(i + 1, n):
-                        src_indices.append(idxs[i])
-                        dst_indices.append(idxs[j])
-
-        if src_indices and dst_indices:
-            edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
-
-            edge_type = "similar_assignment"
-            rel = (node_type, edge_type, node_type)
-            data_store[rel].edge_index = edge_index
-            rev_rel = (node_type, f"rev_{edge_type}", node_type)
-            data_store[rev_rel].edge_index = edge_index.flip(0)
-            print(f"Added sampled pairwise edge_type {rel} with {edge_index.shape[1]} edges.")
-
-    def _build_shared_edges_context_node(
-        self, groups, entity_key, id_to_idx, node_type, group_label, data_store
-    ):
-        # 1. Build unique context nodes
-        group_vals = [group["__group_val"] for group in groups.iter_rows(named=True)]
-        unique_group_vals = sorted(set(group_vals))
-        context_id_map = {val: i for i, val in enumerate(unique_group_vals)}
-        num_context_nodes = len(unique_group_vals)
-        context_node_type = group_label
-
-        context_edges_src = []
-        context_edges_dst = []
-
-        for group in groups.iter_rows(named=True):
-            group_val = group["__group_val"]
-            node_ids = group[entity_key]
-            if not isinstance(node_ids, list):
-                node_ids = [node_ids]
-            idxs = [id_to_idx[nid] for nid in node_ids if nid in id_to_idx]
-            context_idx = context_id_map[group_val]
-            for i in idxs:
-                context_edges_src.append(i)
-                context_edges_dst.append(context_idx)
-
-        # 2. Add context nodes to the graph (as a new node type)
-        data_store[context_node_type].num_nodes = num_context_nodes
-        data_store[context_node_type].x = torch.zeros((num_context_nodes, 1))  # dummy feature
-
-        # 3. Add edges from original nodes to context nodes
-        edge_type = "context_node"
-        edge_index = torch.tensor([context_edges_src, context_edges_dst], dtype=torch.long)
-        rel = (node_type, f"on_{edge_type}", context_node_type)
-        data_store[rel].edge_index = edge_index
-
-        # 4. Add reverse edges
-        rev_rel = (context_node_type, f"rev_on_{edge_type}", node_type)
-        data_store[rev_rel].edge_index = edge_index.flip(0)
-
-        print(f"Added context-node edge_type {rel} with {edge_index.shape[1]} edges.")
-        print(f"Added reverse context-node edge_type {rev_rel} with {edge_index.shape[1]} edges.")
-        print(f"Context nodes created: {num_context_nodes} ({context_node_type})")
 
     def build(self) -> HeteroData:
         self._load_all_tables()
@@ -978,6 +850,227 @@ class GraphBuilder:
         self.logger.dump("pipeline_log.txt")
         return self.data
     
+class CustomEdgeConstructor:
+    @staticmethod
+    def build_shared_edges_random_k_neighbors(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        k,
+        data_store,
+        max_nodes_per_group,
+        seed=42, # set seed for reproducibility
+    ):
+        src_indices = []
+        dst_indices = []
+
+        for group in groups.iter_rows(named=True):
+            node_ids = group[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+
+            idxs = np.array(
+                [id_to_idx[nid] for nid in node_ids if nid in id_to_idx],
+                dtype=np.int64,
+            )
+
+            n = len(idxs)
+            if n < 2:
+                continue
+
+            if n > max_nodes_per_group:
+                # Set rng for reproducibility
+                rng = np.random.default_rng(seed)
+                idxs = rng.choice(idxs, max_nodes_per_group, replace=False)
+                n = len(idxs)
+
+            rng = np.random.default_rng(seed ^ hash(group["__group_val"]) & 0xFFFFFFFF)
+
+            for i in range(n):
+                if n - 1 <= k:
+                    neighbors = np.concatenate([idxs[:i], idxs[i+1:]])
+                else:
+                    choices = rng.choice(n - 1, k, replace=False)
+                    neighbors = idxs[choices + (choices >= i)]
+
+                src_indices.extend([idxs[i]] * len(neighbors))
+                dst_indices.extend(neighbors.tolist())
+
+        if not src_indices:
+            return
+
+        edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
+        edge_type = "random_neighbors"
+        rel = (node_type, edge_type, node_type)
+        rev_rel = (node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        print(
+            f"[random-neighbors] {node_type}: "
+            f"k={k}, groups={len(groups)}, edges={edge_index.size(1)}"
+        )
+
+    @staticmethod
+    def build_shared_edges_pairwise(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        max_edges_per_group,
+        data_store,
+    ):
+        import random
+        src_indices = []
+        dst_indices = []
+
+        for group in groups.iter_rows(named=True):
+            node_ids = group[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+
+            idxs = [id_to_idx[nid] for nid in node_ids if nid in id_to_idx]
+            n = len(idxs)
+            if n < 2:
+                continue
+
+            max_possible = n * (n - 1) // 2
+            num_edges = min(max_edges_per_group, max_possible)
+
+            seen = set()
+            while len(seen) < num_edges:
+                i, j = random.sample(range(n), 2)
+                a, b = idxs[min(i, j)], idxs[max(i, j)]
+                seen.add((a, b))
+
+            if seen:
+                src, dst = zip(*seen)
+                src_indices.extend(src)
+                dst_indices.extend(dst)
+
+        if not src_indices:
+            return
+
+        edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
+        edge_type = "pairwise"
+        rel = (node_type, edge_type, node_type)
+        rev_rel = (node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        print(
+            f"[pairwise] {node_type}: "
+            f"edges={edge_index.size(1)}"
+        )
+
+
+    @staticmethod
+    def build_shared_edges_context_node(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        group_label,
+        data_store,
+    ):
+        """
+        Build context-node edges for a categorical variable.
+
+        Example:
+            task --on_weekday--> weekday_context
+            weekday_context --rev_on_weekday--> task
+
+        Assumptions:
+        - groups has columns: ["__group_val", entity_key]
+        - id_to_idx maps entity_key -> node index
+        """
+
+        # 1) Build context-node mapping (group_val -> context_idx)
+        group_vals = [g["__group_val"] for g in groups.iter_rows(named=True)]
+        unique_group_vals = sorted(set(group_vals))
+
+        if len(unique_group_vals) == 0:
+            return
+
+        context_id_map = {val: i for i, val in enumerate(unique_group_vals)}
+        num_context_nodes = len(unique_group_vals)
+
+        # Use a SAFE, UNIQUE node type name
+        context_node_type = f"{node_type}_{group_label}_context"
+
+        # 2) Build (node, context) pairs
+        rows = []
+        for g in groups.iter_rows(named=True):
+            gv = g["__group_val"]
+            node_ids = g[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+            for nid in node_ids:
+                rows.append((nid, gv))
+
+        if not rows:
+            return
+
+        df = pl.DataFrame(
+            {
+                "nid": [r[0] for r in rows],
+                "group_val": [r[1] for r in rows],
+            }
+        )
+
+        # 3) Vectorized mapping via joins (FAST, no Python lambdas)
+        node_map_df = pl.DataFrame(
+            {
+                "nid": list(id_to_idx.keys()),
+                "node_idx": list(id_to_idx.values()),
+            }
+        )
+
+        context_map_df = pl.DataFrame(
+            {
+                "group_val": list(context_id_map.keys()),
+                "context_idx": list(context_id_map.values()),
+            }
+        )
+
+        df = (
+            df
+            .join(node_map_df, on="nid", how="inner")
+            .join(context_map_df, on="group_val", how="inner")
+        )
+
+        if df.is_empty():
+            return
+
+        src_indices = df["node_idx"].to_numpy()
+        dst_indices = df["context_idx"].to_numpy()
+
+        # 4) Create edges (forward + reverse)
+        edge_index = torch.tensor(
+            [src_indices, dst_indices],
+            dtype=torch.long,
+        )
+
+        edge_type = f"on_{group_label}"
+        rel = (node_type, edge_type, context_node_type)
+        rev_rel = (context_node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        # 5) Create context nodes
+        # if not hasattr(data_store[context_node_type], "num_nodes"):
+        data_store[context_node_type].num_nodes = num_context_nodes
+        data_store[context_node_type].x = torch.zeros((num_context_nodes, 1), dtype=torch.float)
+
+        # 6) Logging
+        print(
+            f"[context-node] {node_type} --{edge_type}--> {context_node_type} | "
+            f"context_nodes={num_context_nodes}, edges={edge_index.size(1)}"
+        )
 
 
 # -------------------------

@@ -1,6 +1,6 @@
 graph_name: sdge.pt 
 # This is the number of nodes included in each group when constructing edges based on shared groups
-MAX_NODES_PER_GROUP: 50000
+MAX_NODES_PER_GROUP: 20000
 
 # This is the maximum number of edges included in each group when constructing edges based on shared groups
 # Number of edges added = MAX_EDGES_PER_GROUP * number of groups
