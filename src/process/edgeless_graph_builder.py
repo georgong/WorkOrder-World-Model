@@ -480,7 +480,7 @@ class GraphBuilder:
 
             df_concat = df_concat.drop("FINISHTIME")
             before = df_concat.height
-            cap = df_concat.select(pl.col("COMPLETIONTIME").quantile(0.99)).item()
+            cap = df_concat.select(pl.col("COMPLETIONTIME").quantile(0.999)).item()
 
             df_concat = df_concat.with_columns(
                 pl.when(pl.col("COMPLETIONTIME") > cap)
@@ -491,7 +491,7 @@ class GraphBuilder:
 
             after = df_concat.height
             dropped = before - after
-            print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.99)={cap}")
+            print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.999)={cap}")
         return df_concat
 
     def _preprocess_df(self, df_concat, vars_meta):
@@ -1073,8 +1073,10 @@ class CustomEdgeConstructor:
         )
 
 
-
-def main(schema: Dict[str, Any]) -> None:
+# -------------------------
+# Demo entry
+# -------------------------
+def _demo_test(schema: Dict[str, Any]) -> None:
     gb = GraphBuilder(yaml=schema, data_dir="data/raw")
     g = gb.build()
 
@@ -1091,7 +1093,8 @@ def main(schema: Dict[str, Any]) -> None:
 
 if __name__ == "__main__":
     # How to run:
-    # python -m src.process.structure_graph_builder
+    # python -m src.process.edgeless_graph_builder
     with open("configs/graph.yaml", "r") as f:
         schema = yaml.safe_load(f)
-    main(schema)
+
+    _demo_test(schema)
