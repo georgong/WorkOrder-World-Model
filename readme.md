@@ -313,11 +313,12 @@ bash scripts/visualize_graph.sh
 
 ### Training
 ```
+bash scripts/prune_graph.sh
 bash scripts/train_gnn.sh
 ```
 
 ### Prediction Interpertation(after training)
 ```
-python -m src.runner interpert_subgraph
+python -m src.runner.interpret_subgraph
 bash scripts/visualize_interpretation.sh
 ```
