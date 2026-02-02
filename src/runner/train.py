@@ -17,6 +17,7 @@ from torch_geometric.loader import NeighborLoader
 
 import wandb
 
+
 def _parse_int_range_token(tok: str) -> list[int]:
     tok = tok.strip()
     if not tok:
@@ -59,9 +60,10 @@ def parse_seeds_arg(seeds: str | None, seeds_file: str | None) -> torch.Tensor |
     if not items:
         return None
 
-    # uniq + sort
     uniq = sorted(set(items))
     return torch.tensor(uniq, dtype=torch.long)
+
+
 # -------------------------
 # device / utilities
 # -------------------------
@@ -75,15 +77,15 @@ def pick_device(s: str) -> torch.device:
         return torch.device("cpu")
     return torch.device(s)
 
+
 @torch.no_grad()
 def batch_stats_1d(v: torch.Tensor) -> Dict[str, float]:
-    # v: 1D tensor
     v = v.detach()
     if v.numel() <= 1:
         return {"mean": v.mean().item(), "var": 0.0, "std": 0.0}
-    # unbiased=False 更稳定，跟你 normalize 用法一致
     var = v.var(unbiased=False).item()
     return {"mean": v.mean().item(), "var": var, "std": (var ** 0.5)}
+
 
 def check_tensor(name: str, t: torch.Tensor) -> None:
     if not isinstance(t, torch.Tensor):
@@ -111,7 +113,9 @@ def compute_target_degree(data: HeteroData, target: str, *, degree_mode: str = "
     return deg
 
 
-def split_indices(idx: torch.Tensor, *, seed: int, train_ratio: float, val_ratio: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def split_indices(
+    idx: torch.Tensor, *, seed: int, train_ratio: float, val_ratio: float
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert idx.ndim == 1
     N = idx.numel()
     g = torch.Generator().manual_seed(seed)
@@ -121,8 +125,8 @@ def split_indices(idx: torch.Tensor, *, seed: int, train_ratio: float, val_ratio
     n_val = int(N * val_ratio)
 
     train_idx = perm[:n_train]
-    val_idx = perm[n_train:n_train + n_val]
-    test_idx = perm[n_train + n_val:]
+    val_idx = perm[n_train : n_train + n_val]
+    test_idx = perm[n_train + n_val :]
     return train_idx, val_idx, test_idx
 
 
@@ -167,7 +171,6 @@ def normalize_node_features_inplace(
 
         if hasattr(data[nt], "attr_name"):
             an = data[nt].attr_name
-            # NOTE: this only works if attr_name matches original feature dim
             if isinstance(an, list) and len(an) == int(keep.numel()):
                 data[nt].attr_name = [an[i] for i in range(len(an)) if bool(keep[i].item())]
 
@@ -195,6 +198,63 @@ def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
             del store[key]
 
     return data
+
+
+# -------------------------
+# DEBUG: sampled nodes/edges summary
+# -------------------------
+def summarize_hetero_batch(batch: HeteroData) -> Dict[str, object]:
+    """
+    Return counts for this sampled batch:
+      - total_nodes, total_edges
+      - nodes_by_type: {node_type: n}
+      - edges_by_type: {str(edge_type_tuple): m}
+    Prefer PyG-provided num_sampled_nodes/edges if present, else fallback.
+    """
+    out: Dict[str, object] = {}
+
+    # Newer PyG: batch.num_sampled_nodes is often a dict-like keyed by node type
+    if hasattr(batch, "num_sampled_nodes") and batch.num_sampled_nodes is not None:
+        try:
+            nsn = dict(batch.num_sampled_nodes)
+            nodes_by_type = {k: int(v) for k, v in nsn.items()}
+            out["nodes_by_type"] = nodes_by_type
+            out["total_nodes"] = int(sum(nodes_by_type.values()))
+        except Exception:
+            pass
+
+    if hasattr(batch, "num_sampled_edges") and batch.num_sampled_edges is not None:
+        try:
+            nse = dict(batch.num_sampled_edges)
+            edges_by_type = {str(k): int(v) for k, v in nse.items()}
+            out["edges_by_type"] = edges_by_type
+            out["total_edges"] = int(sum(edges_by_type.values()))
+        except Exception:
+            pass
+
+    # Fallback: compute from stores
+    if "nodes_by_type" not in out:
+        nodes_by_type: Dict[str, int] = {}
+        total_nodes = 0
+        for nt in batch.node_types:
+            n = int(batch[nt].num_nodes)
+            nodes_by_type[nt] = n
+            total_nodes += n
+        out["nodes_by_type"] = nodes_by_type
+        out["total_nodes"] = total_nodes
+
+    if "edges_by_type" not in out:
+        edges_by_type: Dict[str, int] = {}
+        total_edges = 0
+        for et in batch.edge_types:
+            ei = batch[et].edge_index
+            m = int(ei.size(1)) if isinstance(ei, torch.Tensor) else 0
+            edges_by_type[str(et)] = m
+            total_edges += m
+        out["edges_by_type"] = edges_by_type
+        out["total_edges"] = total_edges
+
+    return out
 
 
 # -------------------------
@@ -278,7 +338,14 @@ def baseline_smoothl1_on_loader(loader, target: str, device, c: float, beta: flo
     return total / max(n, 1)
 
 
-def save_checkpoint(save_dir: Path, run_name: str, epoch: int, model: nn.Module, opt: torch.optim.Optimizer, args: argparse.Namespace):
+def save_checkpoint(
+    save_dir: Path,
+    run_name: str,
+    epoch: int,
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    args: argparse.Namespace,
+):
     save_dir.mkdir(parents=True, exist_ok=True)
 
     ckpt_path = save_dir / f"{run_name}_epoch{epoch:03d}.pt"
@@ -290,7 +357,6 @@ def save_checkpoint(save_dir: Path, run_name: str, epoch: int, model: nn.Module,
     }
     torch.save(payload, ckpt_path)
 
-    # also save args as json once
     args_path = save_dir / f"{run_name}_config.json"
     if not args_path.exists():
         args_path.write_text(json.dumps(vars(args), indent=2))
@@ -306,7 +372,7 @@ def main():
     ap.add_argument("--pt", type=str, default="data/graph/sdge.pt")
     ap.add_argument("--target", type=str, default="assignments")
 
-    ap.add_argument("--epochs", type=int, default=2)  # <<< only 2 by default
+    ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -320,19 +386,47 @@ def main():
     ap.add_argument("--val_ratio", type=float, default=0.1)
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--eval_batch_size", type=int, default=256)
-    ap.add_argument("--num_neighbors", type=int, default=10)
+    ap.add_argument("--num_neighbors", type=int, default=3)
 
     # wandb / saving
     ap.add_argument("--wandb_project", type=str, default="scheduling_world_model")
     ap.add_argument("--wandb_run_name", type=str, default=None)
     ap.add_argument("--save_dir", type=str, default="runs/checkpoints")
-    ap.add_argument("--save_every", type=int, default=1)  # save each epoch
-    ap.add_argument("--seeds", type=str, default=None,
-                    help='Comma/range list in target index space, e.g. "1,2,10-20"')
-    ap.add_argument("--seeds_file", type=str, default=None,
-                    help="Text file of seed indices (one per line, allow commas/ranges)")
-    ap.add_argument("--seeds_use_splits", action="store_true",
-                    help="If set: apply train/val/test split on provided seeds. Otherwise use all as train.")
+    ap.add_argument("--save_every", type=int, default=1)
+
+    # custom seeds
+    ap.add_argument(
+        "--seeds",
+        type=str,
+        default=None,
+        help='Comma/range list in target index space, e.g. "1,2,10-20"',
+    )
+    ap.add_argument(
+        "--seeds_file",
+        type=str,
+        default=None,
+        help="Text file of seed indices (one per line, allow commas/ranges)",
+    )
+    ap.add_argument(
+        "--seeds_use_splits",
+        action="store_true",
+        help="If set: apply train/val/test split on provided seeds. Otherwise use all as train.",
+    )
+
+    # DEBUG controls
+    ap.add_argument(
+        "--debug_sample_every",
+        type=int,
+        default=50,
+        help="Print sampled node/edge counts every N steps (also prints first few steps). 0 disables printing.",
+    )
+    ap.add_argument(
+        "--wandb_log_edge_topk",
+        type=int,
+        default=0,
+        help="If >0: log top-K sampled edge types (can get noisy).",
+    )
+
     args = ap.parse_args()
     torch.manual_seed(args.seed)
 
@@ -349,7 +443,6 @@ def main():
         config=vars(args),
     )
     run_name = run.name or run.id
-
     save_dir = Path(args.save_dir)
 
     # 1) load CPU
@@ -376,7 +469,6 @@ def main():
 
     user_seeds = parse_seeds_arg(args.seeds, args.seeds_file)  # target index space
     if user_seeds is not None:
-        # sanity: bounds
         if user_seeds.min().item() < 0 or user_seeds.max().item() >= data[target].num_nodes:
             raise ValueError(
                 f"--seeds out of range for target '{target}': "
@@ -385,7 +477,6 @@ def main():
 
         kept = user_seeds
 
-        # optionally also apply min_degree filter on top (keeps your original constraint)
         if args.min_degree is not None and args.min_degree > 0:
             kept = kept[deg[kept] >= args.min_degree]
 
@@ -401,12 +492,16 @@ def main():
             val_idx = kept[:0]
             test_idx = kept[:0]
 
-        print(f"[info] using user seeds: kept={kept.numel()} train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}")
-
+        print(
+            f"[info] using user seeds: kept={kept.numel()} "
+            f"train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}"
+        )
     else:
         kept = (deg >= args.min_degree).nonzero(as_tuple=False).view(-1)
         if kept.numel() == 0:
-            raise ValueError(f"No target nodes left after filtering: min_degree={args.min_degree}, mode={args.degree_mode}")
+            raise ValueError(
+                f"No target nodes left after filtering: min_degree={args.min_degree}, mode={args.degree_mode}"
+            )
 
         train_idx, val_idx, test_idx = split_indices(
             kept, seed=args.seed, train_ratio=args.train_ratio, val_ratio=args.val_ratio
@@ -417,8 +512,10 @@ def main():
             f"train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}"
         )
 
-    print(f"[info] target={target} total={data[target].num_nodes} kept={kept.numel()} "
-          f"train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}")
+    print(
+        f"[info] target={target} total={data[target].num_nodes} kept={kept.numel()} "
+        f"train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}"
+    )
 
     # 5) normalize node features
     normalize_node_features_inplace(data, drop_const=True)
@@ -474,7 +571,7 @@ def main():
         shuffle=False,
     )
 
-    # 9) smarter static baseline: median (for SmoothL1)
+    # 9) baseline: median (for SmoothL1)
     train_y = data[target].y[train_idx].float()
     c_med = train_y.median().item()
     baseline_med = baseline_smoothl1_on_loader(train_loader, target, device, c_med, beta=1.0)
@@ -493,15 +590,54 @@ def main():
             batch = batch.to(device)
             pred = model(batch)["pred"]
             y = batch[target].y.float()
+
             bs = int(batch[target].batch_size)
             p = pred[:bs]
             t = y[:bs]
+
+            # -------- DEBUG: sampled nodes/edges per batch --------
+            dbg = summarize_hetero_batch(batch)
+
+            # print policy: first 5 steps always, then every N steps if enabled
+            do_print = False
+            if args.debug_sample_every and args.debug_sample_every > 0:
+                if global_step < 5 or (global_step % args.debug_sample_every == 0):
+                    do_print = True
+
+            if do_print:
+                print(
+                    f"[sample] epoch={epoch} step={global_step} seed_bs={bs} "
+                    f"total_nodes={dbg['total_nodes']} total_edges={dbg['total_edges']} "
+                    f"nodes_{target}={int(dbg['nodes_by_type'].get(target, -1))}"
+                )
+                # Uncomment if you want full breakdown in stdout:
+                # print("[sample] nodes_by_type:", dbg["nodes_by_type"])
+                # print("[sample] edges_by_type:", dbg["edges_by_type"])
+
+            # log core sampling stats to wandb
+            wandb.log(
+                {
+                    "sample/seed_bs": bs,
+                    "sample/total_nodes": dbg["total_nodes"],
+                    "sample/total_edges": dbg["total_edges"],
+                    f"sample/nodes_{target}": int(dbg["nodes_by_type"].get(target, -1)),
+                },
+                step=global_step,
+            )
+
+            # OPTIONAL: log top-K sampled edge types (noisy if K>0)
+            if args.wandb_log_edge_topk and args.wandb_log_edge_topk > 0:
+                edges_by_type = dbg.get("edges_by_type", {})
+                if isinstance(edges_by_type, dict) and len(edges_by_type) > 0:
+                    top = sorted(edges_by_type.items(), key=lambda kv: kv[1], reverse=True)[
+                        : args.wandb_log_edge_topk
+                    ]
+                    wandb.log({f"sample/edge_top/{k}": v for k, v in top}, step=global_step)
 
             # variance within this batch
             p_stats = batch_stats_1d(p)
             t_stats = batch_stats_1d(t)
 
-            # ratio is a quick sanity check: pred variance vs label variance
             var_ratio = p_stats["var"] / (t_stats["var"] + 1e-12)
 
             loss = F.smooth_l1_loss(pred[:bs], y[:bs], beta=1.0)
@@ -517,15 +653,15 @@ def main():
 
             tqdm_bar.set_postfix(batch_loss=f"{loss.item():.4f}", avg_loss=f"{avg_loss:.4f}")
 
-            # log per step (you can downsample if it’s too chatty)
             wandb.log(
-                {"train/batch_loss": loss.item(), 
-                 "train/avg_loss": avg_loss,
-                 "train/pred_std": p_stats["std"],
-                 "train/y_mean": t_stats["mean"],
-                 "train/y_var": t_stats["var"],
-                 "train/y_std": t_stats["std"],
-                 "train/var_ratio_pred_to_y": var_ratio
+                {
+                    "train/batch_loss": loss.item(),
+                    "train/avg_loss": avg_loss,
+                    "train/pred_std": p_stats["std"],
+                    "train/y_mean": t_stats["mean"],
+                    "train/y_var": t_stats["var"],
+                    "train/y_std": t_stats["std"],
+                    "train/var_ratio_pred_to_y": var_ratio,
                 },
                 step=global_step,
             )
@@ -535,7 +671,6 @@ def main():
         if args.save_every > 0 and (epoch % args.save_every == 0):
             save_checkpoint(save_dir, run_name, epoch, model, opt, args)
 
-        #tr = eval_loader(model, eval_train_loader, target, device)
         va = eval_loader(model, val_loader, target, device)
         te = eval_loader(model, test_loader, target, device)
 
@@ -557,13 +692,9 @@ def main():
             step=global_step,
         )
 
-        # save weights
-
-
         if device.type == "mps":
             torch.mps.empty_cache()
 
-    # final save
     save_checkpoint(save_dir, run_name, args.epochs, model, opt, args)
     wandb.finish()
 

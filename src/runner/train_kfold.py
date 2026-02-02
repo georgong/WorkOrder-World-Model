@@ -535,7 +535,7 @@ def main():
 
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--eval_batch_size", type=int, default=256)
-    ap.add_argument("--num_neighbors", type=int, default=10)
+    ap.add_argument("--num_neighbors", type=int, default=4)
 
     # kfold
     ap.add_argument("--k_folds", type=int, default=5)

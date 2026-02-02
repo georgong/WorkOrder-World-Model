@@ -348,7 +348,7 @@ def main():
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--splits", type=str, default="val,test", help='Comma list: "train,val,test"')
     ap.add_argument("--eval_batch_size", type=int, default=256)
-    ap.add_argument("--num_neighbors", type=int, default=10, help="Neighbors per layer for eval")
+    ap.add_argument("--num_neighbors", type=int, default=3, help="Neighbors per layer for eval")
     ap.add_argument("--out_dir", type=str, default="runs/eval_results")
     args = ap.parse_args()
 
