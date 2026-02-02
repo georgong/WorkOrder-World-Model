@@ -1,0 +1,1 @@
+python -m src.process.prune_graph --in_pt data/graph/sdge.pt --out_pt data/graph/sdge_pruned.pt
