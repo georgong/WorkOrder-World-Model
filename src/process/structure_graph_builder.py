@@ -400,7 +400,53 @@ def build_edge_index_only(
     dst = torch.tensor(E["__dst_idx"].to_list(), dtype=torch.long)
     edge_index = torch.stack([src, dst], dim=0)
     return edge_index
+def project_metapath_edges(
+    data: HeteroData,
+    *,
+    rel1: tuple[str, str, str],  # (src, r1, mid1)
+    rel2: tuple[str, str, str],  # (mid1, r2, mid2)
+    rel3: tuple[str, str, str],  # (mid2, r3, dst)
+    min_count: int = 1,          # 出现次数阈值，可选
+) -> torch.Tensor:
+    """
+    Project rel1 ∘ rel2 ∘ rel3 into a direct edge_index from src -> dst
+    using sparse matmul. Values become "number of distinct paths" (roughly).
+    """
+    try:
+        from torch_sparse import SparseTensor
+    except Exception as e:
+        raise ImportError(
+            "torch_sparse not available. Install PyG deps (torch-sparse) or switch to a join-based projection."
+        ) from e
 
+    src, _, mid1 = rel1
+    _mid1, _, mid2 = rel2
+    _mid2, _, dst = rel3
+
+    assert mid1 == _mid1 and mid2 == _mid2, f"Bad metapath: {rel1} -> {rel2} -> {rel3}"
+
+    ei1 = data[rel1].edge_index
+    ei2 = data[rel2].edge_index
+    ei3 = data[rel3].edge_index
+
+    n_src = data[src].num_nodes
+    n_mid1 = data[mid1].num_nodes
+    n_mid2 = data[mid2].num_nodes
+    n_dst = data[dst].num_nodes
+
+    # Build SparseTensor adjacencies with value=1
+    A1 = SparseTensor(row=ei1[0], col=ei1[1], sparse_sizes=(n_src, n_mid1))
+    A2 = SparseTensor(row=ei2[0], col=ei2[1], sparse_sizes=(n_mid1, n_mid2))
+    A3 = SparseTensor(row=ei3[0], col=ei3[1], sparse_sizes=(n_mid2, n_dst))
+
+    P = (A1 @ A2) @ A3  # sparse matmul
+    row, col, val = P.coo()  # val = 路径数（加和）
+
+    if min_count > 1:
+        keep = val >= min_count
+        row, col = row[keep], col[keep]
+
+    return torch.stack([row, col], dim=0)
 
 # -------------------------
 # GraphBuilder
@@ -484,6 +530,34 @@ class GraphBuilder:
             dropped = before - after
             print(f"[assignments] COMPLETIONTIME filter: dropped {dropped} / {before} rows ({dropped / max(before,1):.2%}); cap(q0.99)={cap}")
         return df_concat
+
+    def _build_engineer_task_type_edges_from_graph(self) -> None:
+        # 你得把这三个 rel 改成你自己图里真实存在的 edge_types
+        # 最稳的办法：print(self.data.edge_types) 看一眼再填
+        rel_ea = ("engineers", "relates_to", "assignments")
+        rel_at = ("assignments", "relates_to", "tasks")
+        rel_tt = ("tasks", "relates_to", "task_types")
+
+        # 如果你实际是反向边，比如 ("assignments","rev_relates_to","engineers")
+        # 就换成你想要的方向，或者直接用 flip(0)
+
+        for rel in [rel_ea, rel_at, rel_tt]:
+            assert rel in self.data.edge_types, f"Missing edge type {rel}. Existing: {self.data.edge_types}"
+
+        edge_index = project_metapath_edges(
+            self.data,
+            rel1=rel_ea,
+            rel2=rel_at,
+            rel3=rel_tt,
+            min_count=1,   # 你也可以设成 2/3，过滤掉“只出现一次”的弱关联
+        )
+
+        rel = ("engineers", "works_on_type", "task_types")
+        self.data[rel].edge_index = edge_index
+        self.data[("task_types", "rev_works_on_type", "engineers")].edge_index = edge_index.flip(0)
+
+        self.logger.log("graph_build_up", f"{rel}: edge_index={tuple(edge_index.shape)}")
+        print(rel, edge_index.shape)
 
     def _preprocess_df(self, df_concat, vars_meta):
         '''
@@ -754,6 +828,7 @@ class GraphBuilder:
         self._load_all_tables()
         self._build_all_nodes()
         self._build_edges()
+        self._build_engineer_task_type_edges_from_graph()
 
 
         # sanity checks
