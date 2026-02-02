@@ -4,6 +4,8 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from collections import defaultdict
+import random 
+from itertools import combinations
 
 import os
 import numpy as np
@@ -89,6 +91,10 @@ preprocessing_dict = {
     "engineers": {"func": process_engineer_feature, "schema": engineer_schema},
     # departments / task_types / task_statuses / equipment / regions 目前没给 func，就先用“原始数值列”兜底
 }
+
+# This is used in _build_edges_by_shared_edge_trait() to avoid memory explosion for very large groups
+# MAX_NODES_PER_GROUP = 2000
+# MAX_EDGES_PER_GROUP = 10000
 
 
 # -------------------------
@@ -470,6 +476,9 @@ class GraphBuilder:
         self.tables: Dict[str, pl.DataFrame] = {}
         self.data = HeteroData()
 
+        self.MAX_NODES_PER_GROUP = self.yaml.get("MAX_NODES_PER_GROUP", 2000)
+        self.MAX_EDGES_PER_GROUP = self.yaml.get("MAX_EDGES_PER_GROUP", 10000)
+
     def _load_table(self, schema: Dict[str, Any], df_type: str, data_dir: str = "data/raw") -> pl.DataFrame:
         assert df_type in TYPE_DIR_MAP, f"df_type must be one of {sorted(TYPE_DIR_MAP.keys())} but got {df_type!r}"
 
@@ -788,8 +797,36 @@ class GraphBuilder:
                 # reverse edge (optional but usually helpful)
                 rev_rel = (dst_type, f"rev_{edge_type}", src_type)
                 self.data[rev_rel].edge_index = edge_index.flip(0)
-    
+
     def _build_edges_by_shared_edge_trait(self):
+        """
+        For each node type, create edges between nodes that share the same value of an 'edge' trait variable.
+        Supports flexible edge construction for datetime (weekday, month, day, week), categorical, and numeric.
+        Uses the 'edge_construct' key in the variable's metadata to determine grouping logic.
+        """
+        print('Start building edges by shared edge trait...')
+
+        # Define group extractors for different group types
+        def group_weekday(col): return col.dt.weekday()
+        def group_month(col): return col.dt.month()
+        def group_day(col): return col.dt.day()
+        def group_week(col): return col.dt.week()
+        def group_identity(col): return col
+        def group_top_n_categorical(col, top_n=10):
+            top_vals = col.value_counts().head(top_n).select(pl.col(col.name)).to_series().to_list()
+            return pl.when(col.is_in(top_vals)).then(col).otherwise(None)
+
+        group_extractors = {
+            "weekday": group_weekday,
+            "month": group_month,
+            "day": group_day,
+            "week": group_week,
+            "identity": group_identity,
+            "categorical": group_identity,
+            "top_n_categorical": lambda col: group_top_n_categorical(col=col, top_n=meta.get("top_n", 10)),
+            # Add more as needed
+        }
+        
         for node_type, node_cfg in self.yaml["mappings"].items():
             df = self.tables[node_type]
             vars_cfg = self.yaml["datasets"][node_type]["variables"]
@@ -797,38 +834,48 @@ class GraphBuilder:
             keys_sorted = self.data[node_type].__key_index
 
             for col, meta in vars_cfg.items():
-                if meta.get("trait_type") != "edge":
+                if meta.get("mask", True) or meta.get("trait_type") != "edge" or meta.get("edge_construct", None) is None:
                     continue
 
-                # Optionally, transform value (e.g., extract month from datetime)
-                if meta.get("dtype", "").startswith("datetime"):
-                    group_vals = df[col].dt.month()
+                edge_construct = meta.get("edge_construct", None)
+
+                edge_group = meta.get("edge_group", "identity")  # default to identity
+                extractor = group_extractors.get(edge_group, group_identity)
+                group_vals = extractor(df[col]).alias("__group_val")
+                group_label = edge_group
+
+                # Add group value column
+                df_with_group = df.with_columns(group_vals)
+                # Drop null group values
+                df_with_group = df_with_group.drop_nulls(["__group_val"])
+                groups = df_with_group.group_by("__group_val").agg(pl.col(entity_key))
+
+                id_to_idx = dict(zip(keys_sorted[entity_key].to_list(), keys_sorted["__idx"].to_list()))
+                
+                print('Building edges for node_type:', node_type, 'using column:', col, 'with edge_construct:', edge_construct)
+                
+                # Collect edges
+                if edge_construct == "context_node":
+                    CustomEdgeConstructor.build_shared_edges_context_node(
+                        groups, entity_key, id_to_idx, node_type, group_label, data_store=self.data
+                    )
+                    ...
+                elif edge_construct == "neighbor":
+                    CustomEdgeConstructor.build_shared_edges_random_k_neighbors(
+                        groups, entity_key, id_to_idx, node_type, k=meta.get("neighbor_k", 3), max_nodes_per_group=self.MAX_NODES_PER_GROUP, data_store=self.data
+                    )
                 else:
-                    group_vals = df[col]
-
-                # Group by the edge variable
-                groups = df.with_columns(group_vals.alias("__group_val")).groupby("__group_val")
-
-                for group_val, group_df in groups:
-                    node_ids = group_df[entity_key].to_list()
-                    # Create all pairs (i, j) where i != j
-                    for i in range(len(node_ids)):
-                        for j in range(i + 1, len(node_ids)):
-                            src_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[i])["__idx"][0]
-                            dst_idx = keys_sorted.filter(pl.col(entity_key) == node_ids[j])["__idx"][0]
-                            # Add edge (src_idx, dst_idx) and (dst_idx, src_idx) if undirected
-
-                    # Collect all edges for this group and add to self.data
-
-                # You may want to batch this for efficiency
-
-                # Store as a new edge type, e.g., (node_type, f"shared_{col}", node_type)
+                    CustomEdgeConstructor.build_shared_edges_pairwise(
+                        groups, entity_key, id_to_idx, node_type,  max_edges_per_group=self.MAX_EDGES_PER_GROUP, data_store=self.data
+                    )
+                    ...
 
     def build(self) -> HeteroData:
         self._load_all_tables()
         self._build_all_nodes()
         self._build_edges()
         self._build_engineer_task_type_edges_from_graph()
+        self._build_edges_by_shared_edge_trait()
 
 
         # sanity checks
@@ -849,12 +896,22 @@ class GraphBuilder:
             )
 
         for ntype in self.data.node_types:
-            self.logger.log(
-                "graph_build_up",
-                f"{ntype}: feature_shape={tuple(self.data[ntype].x.shape)}, num_nodes={len(self.data[ntype].node_ids)}"
-            )
-            print(ntype, self.data[ntype].x.shape, len(self.data[ntype].node_ids))
-
+            node_storage = self.data[ntype]
+            num_nodes = node_storage.num_nodes
+            if hasattr(node_storage, "node_ids"):
+                node_ids_len = len(node_storage.node_ids)
+                self.logger.log(
+                    "graph_build_up",
+                    f"{ntype}: feature_shape={tuple(node_storage.x.shape)}, num_nodes={node_ids_len}"
+                )
+                print(ntype, node_storage.x.shape, node_ids_len)
+            else:
+                self.logger.log(
+                    "graph_build_up",
+                    f"{ntype}: feature_shape={tuple(node_storage.x.shape)}, num_nodes={num_nodes}"
+                )
+                print(ntype, node_storage.x.shape, num_nodes)
+        
         for etype in self.data.edge_types[:10]:
             self.logger.log(
                 "graph_build_up",
@@ -862,22 +919,254 @@ class GraphBuilder:
             )
             print(etype, self.data[etype].edge_index.shape)
 
+        total_edges = sum(self.data[etype].edge_index.shape[1] for etype in self.data.edge_types)
+        print(f"Total number of edges: {total_edges}")
 
         self.logger.dump("pipeline_log.txt")
         return self.data
     
+class CustomEdgeConstructor:
+    @staticmethod
+    def build_shared_edges_random_k_neighbors(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        k,
+        data_store,
+        max_nodes_per_group,
+        seed=42, # set seed for reproducibility
+    ):
+        src_indices = []
+        dst_indices = []
+
+        for group in groups.iter_rows(named=True):
+            node_ids = group[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+
+            idxs = np.array(
+                [id_to_idx[nid] for nid in node_ids if nid in id_to_idx],
+                dtype=np.int64,
+            )
+
+            n = len(idxs)
+            if n < 2:
+                continue
+
+            if n > max_nodes_per_group:
+                # Set rng for reproducibility
+                rng = np.random.default_rng(seed)
+                idxs = rng.choice(idxs, max_nodes_per_group, replace=False)
+                n = len(idxs)
+
+            rng = np.random.default_rng(seed ^ hash(group["__group_val"]) & 0xFFFFFFFF)
+
+            for i in range(n):
+                if n - 1 <= k:
+                    neighbors = np.concatenate([idxs[:i], idxs[i+1:]])
+                else:
+                    choices = rng.choice(n - 1, k, replace=False)
+                    neighbors = idxs[choices + (choices >= i)]
+
+                src_indices.extend([idxs[i]] * len(neighbors))
+                dst_indices.extend(neighbors.tolist())
+
+        if not src_indices:
+            return
+
+        edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
+        edge_type = "random_neighbors"
+        rel = (node_type, edge_type, node_type)
+        rev_rel = (node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        print(
+            f"[random-neighbors] {node_type}: "
+            f"k={k}, groups={len(groups)}, edges={edge_index.size(1)}"
+        )
+
+    @staticmethod
+    def build_shared_edges_pairwise(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        max_edges_per_group,
+        data_store,
+    ):
+        import random
+        src_indices = []
+        dst_indices = []
+
+        for group in groups.iter_rows(named=True):
+            node_ids = group[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+
+            idxs = [id_to_idx[nid] for nid in node_ids if nid in id_to_idx]
+            n = len(idxs)
+            if n < 2:
+                continue
+
+            max_possible = n * (n - 1) // 2
+            num_edges = min(max_edges_per_group, max_possible)
+
+            seen = set()
+            while len(seen) < num_edges:
+                i, j = random.sample(range(n), 2)
+                a, b = idxs[min(i, j)], idxs[max(i, j)]
+                seen.add((a, b))
+
+            if seen:
+                src, dst = zip(*seen)
+                src_indices.extend(src)
+                dst_indices.extend(dst)
+
+        if not src_indices:
+            return
+
+        edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
+        edge_type = "pairwise"
+        rel = (node_type, edge_type, node_type)
+        rev_rel = (node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        print(
+            f"[pairwise] {node_type}: "
+            f"edges={edge_index.size(1)}"
+        )
+
+
+    @staticmethod
+    def build_shared_edges_context_node(
+        groups,
+        entity_key,
+        id_to_idx,
+        node_type,
+        group_label,
+        data_store,
+    ):
+        """
+        Build context-node edges for a categorical variable.
+
+        Example:
+            task --on_weekday--> weekday_context
+            weekday_context --rev_on_weekday--> task
+
+        Assumptions:
+        - groups has columns: ["__group_val", entity_key]
+        - id_to_idx maps entity_key -> node index
+        """
+
+        # 1) Build context-node mapping (group_val -> context_idx)
+        group_vals = [g["__group_val"] for g in groups.iter_rows(named=True)]
+        unique_group_vals = sorted(set(group_vals))
+
+        if len(unique_group_vals) == 0:
+            return
+
+        context_id_map = {val: i for i, val in enumerate(unique_group_vals)}
+        num_context_nodes = len(unique_group_vals)
+
+        # Use a SAFE, UNIQUE node type name
+        context_node_type = f"{node_type}_{group_label}_context"
+
+        # 2) Build (node, context) pairs
+        rows = []
+        for g in groups.iter_rows(named=True):
+            gv = g["__group_val"]
+            node_ids = g[entity_key]
+            if not isinstance(node_ids, list):
+                node_ids = [node_ids]
+            for nid in node_ids:
+                rows.append((nid, gv))
+
+        if not rows:
+            return
+
+        df = pl.DataFrame(
+            {
+                "nid": [r[0] for r in rows],
+                "group_val": [r[1] for r in rows],
+            }
+        )
+
+        # 3) Vectorized mapping via joins (FAST, no Python lambdas)
+        node_map_df = pl.DataFrame(
+            {
+                "nid": list(id_to_idx.keys()),
+                "node_idx": list(id_to_idx.values()),
+            }
+        )
+
+        context_map_df = pl.DataFrame(
+            {
+                "group_val": list(context_id_map.keys()),
+                "context_idx": list(context_id_map.values()),
+            }
+        )
+
+        df = (
+            df
+            .join(node_map_df, on="nid", how="inner")
+            .join(context_map_df, on="group_val", how="inner")
+        )
+
+        if df.is_empty():
+            return
+
+        src_indices = df["node_idx"].to_numpy()
+        dst_indices = df["context_idx"].to_numpy()
+
+        # 4) Create edges (forward + reverse)
+        edge_index = torch.tensor(
+            [src_indices, dst_indices],
+            dtype=torch.long,
+        )
+
+        edge_type = f"on_{group_label}"
+        rel = (node_type, edge_type, context_node_type)
+        rev_rel = (context_node_type, f"rev_{edge_type}", node_type)
+
+        data_store[rel].edge_index = edge_index
+        data_store[rev_rel].edge_index = edge_index.flip(0)
+
+        # 5) Create context nodes
+        # if not hasattr(data_store[context_node_type], "num_nodes"):
+        data_store[context_node_type].num_nodes = num_context_nodes
+        data_store[context_node_type].x = torch.zeros((num_context_nodes, 1), dtype=torch.float)
+
+        # 6) Logging
+        print(
+            f"[context-node] {node_type} --{edge_type}--> {context_node_type} | "
+            f"context_nodes={num_context_nodes}, edges={edge_index.size(1)}"
+        )
 
 
 
 def main(schema: Dict[str, Any]) -> None:
     gb = GraphBuilder(yaml=schema, data_dir="data/raw")
     g = gb.build()
-    out_put_dir = "data/graph"
-    os.makedirs(out_put_dir, exist_ok=True)
-    torch.save(g, os.path.join(out_put_dir, "sdge.pt"))
+
+    # quick peek
+
+    # torch.save(g, "data/graph/sdge.pt")
+    
+
+    output_path = 'data/graph'
+    graph_name = schema.get('graph_name', 'sdge.pt')
+    os.makedirs(output_path, exist_ok=True)
+    torch.save(g, output_path + '/' + graph_name)
 
 
 if __name__ == "__main__":
+    # How to run:
+    # python -m src.process.structure_graph_builder
     with open("configs/graph.yaml", "r") as f:
         schema = yaml.safe_load(f)
     main(schema)

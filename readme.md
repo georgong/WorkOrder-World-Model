@@ -198,6 +198,13 @@ This YAML defines, **for each dataset and each variable**:
   - **`outlier_type`** – how to interpret outliers (e.g., `datetime`)  
   - **`outlier`** – valid range or thresholds  
     (e.g., `["1980-01-01", "2030-01-01"]`)
+  
+- **Edge construction policy (optional)**
+  - **`edge_group`** – how to group a set of nodes to construct edges (e.g., `weekday`)
+  - **`edge_construct`** – how to connect edges within a group (e.g., `context_node`, `neighbor`, `pairwise`)
+    - `context_node`: connecting all nodes within a group to a central node
+    - `neighbor`: for each node, connect `k` neighbors node 
+    - `pairwise`: connect pairwise node within a group 
 ---
 
 ## Data Processing

@@ -212,4 +212,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # how to run
+    # python -m src.process.prune_graph --in_pt data/graph/sdge.pt --out_pt data/graph/sdge_pruned.pt
     main()

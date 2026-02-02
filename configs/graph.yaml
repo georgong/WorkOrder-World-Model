@@ -1,3 +1,11 @@
+graph_name: sdge.pt 
+# This is the number of nodes included in each group when constructing edges based on shared groups
+MAX_NODES_PER_GROUP: 20000
+
+# This is the maximum number of edges included in each group when constructing edges based on shared groups
+# Number of edges added = MAX_EDGES_PER_GROUP * number of groups
+MAX_EDGES_PER_GROUP: 100000
+
 datasets:
   assignments:
     file: data/raw/W6ASSIGNMENTS.csv
@@ -31,6 +39,8 @@ datasets:
         key: false
         mask: false
         trait_type: edge
+        edge_group: weekday
+        edge_construct: context_node
         outlier_type: datetime
         outlier: ["1980-01-01", "2030-01-01"]
 
@@ -113,7 +123,10 @@ datasets:
         dtype: Int64
         key: false
         mask: false
-        trait_type: node
+        trait_type: edge
+        edge_group: top_n_categorical
+        top_n: 100
+        edge_construct: context_node
       AVAILABILITYFACTOR:
         dtype: Float64
         key: false
@@ -202,6 +215,9 @@ datasets:
         mask: false
         trait_type: edge
         outlier_type: datetime
+        edge_group: month
+        edge_construct: neighbor
+        neighbor_k: 10
         outlier: ["1980-01-01", "2030-01-01"] # 50 years of data
       SCHEDULEDFINISH:
         dtype: datetime64[ns]
@@ -264,12 +280,18 @@ datasets:
         dtype: Int64
         key: false
         mask: false
-        trait_type: node
+        trait_type: edge
+        edge_group: categorical
+        edge_construct: context_node
       STATUS:
         dtype: Int64
         key: true
         mask: true
         trait_type: edge
+        edge_group: top_n_categorical
+        top_n: 12 # 12 groups have significant count
+        edge_construct: neighbor
+        neighbor_k: 10
       JEOPARDYSTATE:
         dtype: Float64
         key: false
@@ -280,6 +302,9 @@ datasets:
         key: false
         mask: false
         trait_type: edge
+        edge_group: categorical
+        edge_construct: neighbor
+        neighbor_k: 10
       REGION:
         dtype: Int64
         key: false
