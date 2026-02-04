@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import HeteroConv, SAGEConv, Linear
+from torch_geometric.nn import HeteroConv, SAGEConv, Linear, HGTConv, RGCNConv
 from torch_geometric.loader import NeighborLoader
 
 import wandb
@@ -94,7 +94,7 @@ def batch_stats_1d(v: torch.Tensor) -> Dict[str, float]:
 
 
 # -------------------------
-# degree + kfold split
+# degree + kfold split (kept for your tooling)
 # -------------------------
 def compute_target_degree(data: HeteroData, target: str, *, degree_mode: str = "in") -> torch.Tensor:
     N = data[target].num_nodes
@@ -131,7 +131,7 @@ def make_kfold_splits(idx: torch.Tensor, *, k: int, seed: int) -> List[torch.Ten
     folds: List[torch.Tensor] = []
     offset = 0
     for fs in fold_sizes:
-        folds.append(perm[offset:offset + fs])
+        folds.append(perm[offset : offset + fs])
         offset += fs
     return folds
 
@@ -139,7 +139,7 @@ def make_kfold_splits(idx: torch.Tensor, *, k: int, seed: int) -> List[torch.Ten
 def complement(all_idx: torch.Tensor, holdout: torch.Tensor) -> torch.Tensor:
     """
     all_idx and holdout are 1D unique.
-    return all_idx  holdout
+    return all_idx % holdout
     """
     hold_set = set(holdout.tolist())
     keep = [int(x) for x in all_idx.tolist() if int(x) not in hold_set]
@@ -226,7 +226,65 @@ def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
 
 
 # -------------------------
-# model (same as yours)
+# RGCN helper: flatten hetero batch into homogeneous graph + relation ids
+# -------------------------
+@torch.no_grad()
+def hetero_to_rgcn_inputs(
+    data: HeteroData,
+    x_dict: Dict[str, torch.Tensor],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, int]]:
+    """
+    Build:
+      x_all: [N_total, H]
+      edge_index_all: [2, E_total]
+      edge_type_all: [E_total] relation ids in [0, num_relations-1]
+      offsets: nt -> global offset
+    Relation id assignment is fixed by data.edge_types order for determinism.
+    """
+    node_types = list(data.node_types)
+
+    offsets: Dict[str, int] = {}
+    total = 0
+    for nt in node_types:
+        offsets[nt] = total
+        total += int(data[nt].num_nodes)
+
+    # concat projected x in deterministic node_types order
+    x_all = torch.cat([x_dict[nt] for nt in node_types], dim=0)
+
+    edge_indices = []
+    edge_types = []
+
+    # relation id: index in edge_types list
+    rel2id = {et: i for i, et in enumerate(list(data.edge_types))}
+    for et in data.edge_types:
+        ei = data[et].edge_index
+        if ei.numel() == 0:
+            continue
+
+        src, rel, dst = et
+        off_s = offsets[src]
+        off_d = offsets[dst]
+
+        ei2 = ei.clone()
+        ei2[0] = ei2[0] + off_s
+        ei2[1] = ei2[1] + off_d
+
+        edge_indices.append(ei2)
+        edge_types.append(torch.full((ei2.size(1),), rel2id[et], dtype=torch.long, device=ei2.device))
+
+    if edge_indices:
+        edge_index_all = torch.cat(edge_indices, dim=1)
+        edge_type_all = torch.cat(edge_types, dim=0)
+    else:
+        edge_index_all = torch.empty((2, 0), dtype=torch.long, device=x_all.device)
+        edge_type_all = torch.empty((0,), dtype=torch.long, device=x_all.device)
+
+    return x_all, edge_index_all, edge_type_all, offsets
+
+
+# -------------------------
+# models
 # -------------------------
 class HeteroSAGERegressor(nn.Module):
     def __init__(self, metadata, in_dims, hidden_dim=128, num_layers=2, target_node_type="assignments"):
@@ -256,6 +314,148 @@ class HeteroSAGERegressor(nn.Module):
         delta = self.out(x_dict[self.target_node_type]).squeeze(-1)
         pred = self.base + delta
         return {"pred": pred}
+
+
+class HGTRegressor(nn.Module):
+    def __init__(
+        self,
+        metadata,
+        in_dims,
+        hidden_dim=128,
+        num_layers=2,
+        num_heads=4,
+        dropout=0.1,
+        hgt_group="sum",  # kept for CLI compatibility (not used due to PyG version differences)
+        target_node_type="assignments",
+    ):
+        super().__init__()
+        self.node_types, self.edge_types = metadata
+        self.target_node_type = target_node_type
+
+        if hidden_dim % num_heads != 0:
+            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by heads ({num_heads})")
+
+        self.in_proj = nn.ModuleDict({nt: Linear(in_dims[nt], hidden_dim) for nt in self.node_types})
+
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for _ in range(num_layers):
+            self.convs.append(
+                HGTConv(
+                    in_channels=hidden_dim,
+                    out_channels=hidden_dim,
+                    metadata=metadata,
+                    heads=num_heads,
+                )
+            )
+            self.norms.append(nn.ModuleDict({nt: nn.LayerNorm(hidden_dim) for nt in self.node_types}))
+
+        self.dropout = float(dropout)
+        self.base = nn.Parameter(torch.tensor(0.0))
+        self.out = Linear(hidden_dim, 1)
+
+    def forward(self, data: HeteroData):
+        x_dict = {nt: F.relu(self.in_proj[nt](data[nt].x)) for nt in self.node_types}
+
+        for i, conv in enumerate(self.convs):
+            x_dict = conv(x_dict, data.edge_index_dict)
+            x_dict = {k: F.relu(self.norms[i][k](v)) for k, v in x_dict.items()}
+            if self.dropout > 0:
+                x_dict = {k: F.dropout(v, p=self.dropout, training=self.training) for k, v in x_dict.items()}
+
+        delta = self.out(x_dict[self.target_node_type]).squeeze(-1)
+        pred = self.base + delta
+        return {"pred": pred}
+
+
+class RGCNRegressor(nn.Module):
+    """
+    RGCN baseline by flattening hetero graph into a single node space with relation ids.
+    Uses:
+      - type-specific input projection (same as others)
+      - RGCNConv layers on flattened edges
+      - readout only on target node type slice
+    """
+
+    def __init__(
+        self,
+        metadata,
+        in_dims,
+        hidden_dim=128,
+        num_layers=2,
+        dropout=0.1,
+        target_node_type="assignments",
+    ):
+        super().__init__()
+        self.node_types, self.edge_types = metadata
+        self.target_node_type = target_node_type
+
+        self.in_proj = nn.ModuleDict({nt: Linear(in_dims[nt], hidden_dim) for nt in self.node_types})
+
+        # num_relations = number of canonical edge types
+        self.num_relations = len(self.edge_types)
+
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        for _ in range(num_layers):
+            self.convs.append(RGCNConv(hidden_dim, hidden_dim, num_relations=self.num_relations))
+            self.norms.append(nn.LayerNorm(hidden_dim))
+
+        self.dropout = float(dropout)
+        self.base = nn.Parameter(torch.tensor(0.0))
+        self.out = Linear(hidden_dim, 1)
+
+    def forward(self, data: HeteroData):
+        x_dict = {nt: F.relu(self.in_proj[nt](data[nt].x)) for nt in self.node_types}
+        x_all, edge_index_all, edge_type_all, offsets = hetero_to_rgcn_inputs(data, x_dict)
+
+        h = x_all
+        for i, conv in enumerate(self.convs):
+            h = conv(h, edge_index_all, edge_type_all)
+            h = F.relu(self.norms[i](h))
+            if self.dropout > 0:
+                h = F.dropout(h, p=self.dropout, training=self.training)
+
+        off = offsets[self.target_node_type]
+        n = int(data[self.target_node_type].num_nodes)
+        h_t = h[off : off + n]
+
+        delta = self.out(h_t).squeeze(-1)
+        pred = self.base + delta
+        return {"pred": pred}
+
+
+def build_model(args: argparse.Namespace, data: HeteroData, in_dims: Dict[str, int], target: str) -> nn.Module:
+    m = args.model.lower()
+    if m == "sage":
+        return HeteroSAGERegressor(
+            metadata=data.metadata(),
+            in_dims=in_dims,
+            hidden_dim=args.hidden,
+            num_layers=args.layers,
+            target_node_type=target,
+        )
+    if m == "hgt":
+        return HGTRegressor(
+            metadata=data.metadata(),
+            in_dims=in_dims,
+            hidden_dim=args.hidden,
+            num_layers=args.layers,
+            num_heads=args.heads,
+            dropout=args.dropout,
+            hgt_group=args.hgt_group,
+            target_node_type=target,
+        )
+    if m == "rgcn":
+        return RGCNRegressor(
+            metadata=data.metadata(),
+            in_dims=in_dims,
+            hidden_dim=args.hidden,
+            num_layers=args.layers,
+            dropout=args.dropout,
+            target_node_type=target,
+        )
+    raise ValueError(f"Unknown --model={args.model!r}. Use sage|hgt|rgcn")
 
 
 # -------------------------
@@ -295,7 +495,7 @@ def eval_loader_smoothl1_mae_rmse(
 
     mse = se_sum / n
     mae = ae_sum / n
-    rmse = mse ** 0.5
+    rmse = mse**0.5
     smoothl1 = sl1_sum / n
     return {"mse": mse, "mae": mae, "rmse": rmse, "smoothl1": smoothl1}
 
@@ -323,7 +523,15 @@ def baseline_smoothl1_on_loader(
     return total / max(n, 1)
 
 
-def save_checkpoint(save_dir: Path, run_name: str, fold: int, epoch: int, model: nn.Module, opt: torch.optim.Optimizer, args: argparse.Namespace):
+def save_checkpoint(
+    save_dir: Path,
+    run_name: str,
+    fold: int,
+    epoch: int,
+    model: nn.Module,
+    opt: torch.optim.Optimizer,
+    args: argparse.Namespace,
+):
     save_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = save_dir / f"{run_name}_fold{fold:02d}_epoch{epoch:03d}.pt"
     payload = {
@@ -380,6 +588,8 @@ def run_one_fold(
         num_neighbors=num_neighbors,
         batch_size=args.batch_size,
         shuffle=True,
+        num_workers=args.num_workers,
+        persistent_workers=(args.num_workers > 0),
     )
     val_loader = NeighborLoader(
         data,
@@ -387,129 +597,157 @@ def run_one_fold(
         num_neighbors=num_neighbors,
         batch_size=args.eval_batch_size,
         shuffle=False,
+        num_workers=args.num_workers,
+        persistent_workers=(args.num_workers > 0),
     )
 
     # model
-    model = HeteroSAGERegressor(
-        metadata=data.metadata(),
-        in_dims=in_dims,
-        hidden_dim=args.hidden,
-        num_layers=args.layers,
-        target_node_type=target,
-    ).to(device)
-
+    model = build_model(args, data, in_dims, target).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     # wandb per fold
     run = wandb.init(
         project=args.wandb_project,
-        name=f"{args.wandb_run_name or 'kfold'}-fold{fold:02d}",
+        name=f"{args.wandb_run_name or 'kfold'}-{args.model}-fold{fold:02d}",
         group=group_name,
         config={**vars(args), "fold": fold, "fold_train_n": int(train_idx.numel()), "fold_val_n": int(val_idx.numel())},
         reinit=True,
     )
     run_name = run.name or run.id
 
-    # baseline from train median (match your logic)
+    # baseline from train median (robust index already ensured upstream)
     c_med = data[target].y[train_idx].median().item()
-    baseline_val = baseline_smoothl1_on_loader(val_loader, target, device, c_med, beta=1.0)
+    baseline_val = baseline_smoothl1_on_loader(val_loader, target, device, c_med, beta=args.beta)
     wandb.log({"baseline/median_c": c_med, "baseline/val_smoothl1": baseline_val}, step=0)
 
-    save_dir = Path(args.save_dir) / (args.wandb_run_name or "kfold") / f"fold{fold:02d}"
+    save_dir = Path(args.save_dir) / (args.wandb_run_name or "kfold") / args.model / f"fold{fold:02d}"
 
     # training
     global_step = 0
     best_val_sl1 = float("inf")
     best_val_rmse = float("inf")
+    best_epoch = -1
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         total_loss = 0.0
         total_seeds = 0
 
-        pbar = tqdm(train_loader, desc=f"Fold {fold:02d} Epoch {epoch:03d} [train]")
+        pbar = tqdm(train_loader, desc=f"Fold {fold:02d} Epoch {epoch:03d} [{args.model}/train]")
         for batch in pbar:
             batch = batch.to(device)
-            pred = model(batch)["pred"]
-            y = batch[target].y.float()
+            pred_all = model(batch)["pred"]
+            y_all = batch[target].y.float()
 
             bs = int(batch[target].batch_size)
-            p = pred[:bs]
-            t = y[:bs]
+            p = pred_all[:bs]
+            t = y_all[:bs]
 
-            p_stats = batch_stats_1d(p)
-            t_stats = batch_stats_1d(t)
-            var_ratio = p_stats["var"] / (t_stats["var"] + 1e-12)
-
-            loss = F.smooth_l1_loss(p, t, beta=1.0)
+            loss = F.smooth_l1_loss(p, t, beta=args.beta, reduction="mean")
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
             opt.step()
 
             total_loss += loss.item() * bs
             total_seeds += bs
-            avg_loss = total_loss / max(total_seeds, 1)
-            pbar.set_postfix(batch_loss=f"{loss.item():.4f}", avg_loss=f"{avg_loss:.4f}")
-
-            wandb.log(
-                {
-                    "train/batch_loss": loss.item(),
-                    "train/avg_loss": avg_loss,
-                    "train/pred_std": p_stats["std"],
-                    "train/y_mean": t_stats["mean"],
-                    "train/y_var": t_stats["var"],
-                    "train/y_std": t_stats["std"],
-                    "train/var_ratio_pred_to_y": var_ratio,
-                },
-                step=global_step,
-            )
             global_step += 1
+
+            # tqdm postfix
+            avg_loss = total_loss / max(total_seeds, 1)
+            postfix = {"loss": f"{avg_loss:.5f}"}
+
+            if args.show_batch_stats:
+                ps = batch_stats_1d(p)
+                ts = batch_stats_1d(t)
+                postfix.update(
+                    {
+                        "p_mu": f"{ps['mean']:.2f}",
+                        "p_sd": f"{ps['std']:.2f}",
+                        "t_mu": f"{ts['mean']:.2f}",
+                        "t_sd": f"{ts['std']:.2f}",
+                    }
+                )
+
+            pbar.set_postfix(postfix)
+
+            if args.nan_check:
+                check_tensor("pred", p)
+                check_tensor("target", t)
+
+            # wandb step-level (optional)
+            if args.wandb_log_every > 0 and (global_step % args.wandb_log_every == 0):
+                wandb.log(
+                    {
+                        "train/step_smoothl1": float(loss.item()),
+                        "train/step_avg_smoothl1": float(avg_loss),
+                        "train/global_step": global_step,
+                        "train/epoch": epoch,
+                    },
+                    step=global_step,
+                )
 
         train_loss = total_loss / max(total_seeds, 1)
 
-        val_metrics = eval_loader_smoothl1_mae_rmse(model, val_loader, target, device, beta=1.0)
+        # epoch-level eval
+        val_metrics = eval_loader_smoothl1_mae_rmse(model, val_loader, target, device, beta=args.beta)
+
+        # log per epoch
         wandb.log(
             {
-                "epoch": epoch,
-                "train/epoch_loss": train_loss,
+                "train/epoch_smoothl1": train_loss,
                 "val/mse": val_metrics["mse"],
                 "val/mae": val_metrics["mae"],
                 "val/rmse": val_metrics["rmse"],
                 "val/smoothl1": val_metrics["smoothl1"],
-                "baseline/val_smoothl1": baseline_val,
-                "val/improve_over_baseline_sl1": baseline_val - val_metrics["smoothl1"],
+                "train/global_step": global_step,
+                "epoch": epoch,
             },
             step=global_step,
         )
 
+        val_sl1 = float(val_metrics["smoothl1"])
+        val_rmse = float(val_metrics["rmse"])
+
         print(
-            f"Fold {fold:02d} Epoch {epoch:03d} | train_loss {train_loss:.6f} | "
-            f"val sl1 {val_metrics['smoothl1']:.4f} (base {baseline_val:.4f}) | "
-            f"val rmse {val_metrics['rmse']:.4f} mae {val_metrics['mae']:.4f}"
+            f"[fold {fold:02d}][{args.model}][epoch {epoch:03d}] "
+            f"train_smoothl1={train_loss:.6f}  "
+            f"val_smoothl1={val_sl1:.6f}  val_rmse={val_rmse:.6f}"
         )
 
-        # save
-        if args.save_every > 0 and (epoch % args.save_every == 0):
+        improved = val_sl1 < best_val_sl1
+        if improved:
+            best_val_sl1 = val_sl1
+            best_val_rmse = min(best_val_rmse, val_rmse)
+            best_epoch = epoch
+            if args.save_best:
+                save_checkpoint(save_dir, run_name, fold, epoch, model, opt, args)
+
+        if args.save_every > 0 and epoch % args.save_every == 0:
             save_checkpoint(save_dir, run_name, fold, epoch, model, opt, args)
 
-        # track best (for summary)
-        best_val_sl1 = min(best_val_sl1, val_metrics["smoothl1"])
-        best_val_rmse = min(best_val_rmse, val_metrics["rmse"])
-
-        if device.type == "mps":
-            torch.mps.empty_cache()
-
-    # final save
-    save_checkpoint(save_dir, run_name, fold, args.epochs, model, opt, args)
+    wandb.log(
+        {
+            "summary/best_epoch": best_epoch,
+            "summary/best_val_smoothl1": best_val_sl1,
+            "summary/best_val_rmse": best_val_rmse,
+            "summary/baseline_val_smoothl1": baseline_val,
+        },
+        step=global_step,
+    )
     wandb.finish()
 
     return {
-        "fold": float(fold),
-        "baseline_val_smoothl1": float(baseline_val),
-        "best_val_smoothl1": float(best_val_sl1),
-        "best_val_rmse": float(best_val_rmse),
+        "fold": fold,
+        "model": args.model,
+        "best_epoch": best_epoch,
+        "best_val_smoothl1": best_val_sl1,
+        "best_val_rmse": best_val_rmse,
+        "baseline_val_smoothl1": baseline_val,
     }
 
 
@@ -517,129 +755,130 @@ def run_one_fold(
 # main
 # -------------------------
 def main():
-    ap = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()
 
-    ap.add_argument("--pt", type=str, default="data/graph/sdge.pt")
-    ap.add_argument("--target", type=str, default="assignments")
+    # data
+    parser.add_argument("--data_path", type=str, required=True, help="Path to torch-saved HeteroData (.pt)")
+    parser.add_argument("--target", type=str, default="assignments")
+    parser.add_argument("--label_key", type=str, default="y")
 
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--hidden", type=int, default=64)
-    ap.add_argument("--layers", type=int, default=2)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--wd", type=float, default=1e-5)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--device", type=str, default="auto")
-
-    ap.add_argument("--min_degree", type=int, default=1)
-    ap.add_argument("--degree_mode", type=str, default="in", choices=["in", "out", "inout"])
-
-    ap.add_argument("--batch_size", type=int, default=256)
-    ap.add_argument("--eval_batch_size", type=int, default=256)
-    ap.add_argument("--num_neighbors", type=int, default=4)
+    # model selection
+    parser.add_argument("--model", type=str, default="hgt", choices=["sage", "hgt", "rgcn"])
 
     # kfold
-    ap.add_argument("--k_folds", type=int, default=5)
-    ap.add_argument("--fold", type=int, default=None, help="If set, only run this fold (0-based). Otherwise run all folds.")
+    parser.add_argument("--k", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seeds", type=str, default=None)
+    parser.add_argument("--seeds_file", type=str, default=None)
 
-    # seeds restriction (optional)
-    ap.add_argument("--seeds", type=str, default=None, help='Comma/range list in target index space, e.g. "1,2,10-20"')
-    ap.add_argument("--seeds_file", type=str, default=None, help="Text file of seed indices (one per line, allow commas/ranges)")
+    # loader
+    parser.add_argument("--batch_size", type=int, default=2048)
+    parser.add_argument("--eval_batch_size", type=int, default=4096)
+    parser.add_argument("--num_neighbors", type=int, default=15)
+    parser.add_argument("--num_workers", type=int, default=0)
 
-    # wandb / saving
-    ap.add_argument("--wandb_project", type=str, default="scheduling_world_model")
-    ap.add_argument("--wandb_run_name", type=str, default=None)
-    ap.add_argument("--save_dir", type=str, default="runs/checkpoints_kfold")
-    ap.add_argument("--save_every", type=int, default=1)
+    # model hparams
+    parser.add_argument("--hidden", type=int, default=128)
+    parser.add_argument("--layers", type=int, default=2)
 
-    args = ap.parse_args()
-    torch.manual_seed(args.seed)
+    # HGT-specific
+    parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--hgt_group", type=str, default="sum", choices=["sum", "mean", "min", "max"])
+
+    # train
+    parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=2e-3)
+    parser.add_argument("--wd", type=float, default=1e-4)
+    parser.add_argument("--beta", type=float, default=1.0)
+    parser.add_argument("--grad_clip", type=float, default=0.0)
+    parser.add_argument("--nan_check", action="store_true")
+    parser.add_argument("--show_batch_stats", action="store_true")
+
+    # wandb
+    parser.add_argument("--wandb_project", type=str, default="kfold")
+    parser.add_argument("--wandb_run_name", type=str, default=None)
+    parser.add_argument("--wandb_log_every", type=int, default=10, help="log train step every N steps (0=off)")
+
+    # checkpoint
+    parser.add_argument("--save_dir", type=str, default="checkpoints")
+    parser.add_argument("--save_every", type=int, default=0)
+    parser.add_argument("--save_best", action="store_true")
+
+    # device
+    parser.add_argument("--device", type=str, default="auto")
+
+    args = parser.parse_args()
 
     device = pick_device(args.device)
-    print(f"[info] device={device}")
+    print(f"[info] device={device} | model={args.model}")
 
-    pt_path = Path(args.pt)
-    assert pt_path.exists(), f"File not found: {pt_path}"
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        raise FileNotFoundError(f"data not found: {data_path}")
 
-    base_data: HeteroData = torch.load(pt_path, map_location="cpu", weights_only=False)
-    assert isinstance(base_data, HeteroData)
+    data: HeteroData = torch.load(data_path, map_location="cpu", weights_only=False)
+    if not isinstance(data, HeteroData):
+        raise TypeError(f"Loaded object is not HeteroData: {type(data)}")
 
     target = args.target
-    assert target in base_data.node_types
-    assert hasattr(base_data[target], "x")
-    assert hasattr(base_data[target], "y")
+    if target not in data.node_types:
+        raise ValueError(f"target node type {target!r} not in node_types={data.node_types}")
 
-    # sanity checks
-    for nt in base_data.node_types:
-        if hasattr(base_data[nt], "x"):
-            check_tensor(f"{nt}.x", base_data[nt].x)
-        if hasattr(base_data[nt], "y"):
-            check_tensor(f"{nt}.y", base_data[nt].y)
+    # map label_key -> y
+    if args.label_key != "y":
+        if not hasattr(data[target], args.label_key):
+            raise ValueError(f"target store has no attribute {args.label_key!r}")
+        data[target].y = getattr(data[target], args.label_key)
 
-    # seeds: user-provided or degree-filtered
-    deg = compute_target_degree(base_data, target, degree_mode=args.degree_mode)
-    user_seeds = parse_seeds_arg(args.seeds, args.seeds_file)
+    # -------------------------
+    # IMPORTANT: supervised index must align with y length, not num_nodes
+    # This fixes your out-of-bounds issue.
+    # -------------------------
+    y = data[target].y
+    if not isinstance(y, torch.Tensor):
+        raise TypeError(f"{target}.y is not a Tensor")
+    y = y.view(-1).float()
+    data[target].y = y
 
-    if user_seeds is not None:
-        if user_seeds.min().item() < 0 or user_seeds.max().item() >= base_data[target].num_nodes:
-            raise ValueError(
-                f"--seeds out of range for target '{target}': "
-                f"[0, {base_data[target].num_nodes - 1}], got min={user_seeds.min().item()} max={user_seeds.max().item()}"
+    finite = torch.isfinite(y)
+    if finite.all():
+        full_idx = torch.arange(int(y.numel()), dtype=torch.long)
+    else:
+        full_idx = torch.nonzero(finite, as_tuple=False).view(-1).long()
+        print(f"[warn] {target}.y has non-finite values; using labeled subset: {full_idx.numel()}/{y.numel()}")
+
+    # multiple seeds
+    seed_list = parse_seeds_arg(args.seeds, args.seeds_file)
+    if seed_list is None:
+        seed_list = torch.tensor([args.seed], dtype=torch.long)
+
+    all_summaries: list[dict] = []
+    for si, seed in enumerate(seed_list.tolist()):
+        print(f"\n[seed {seed}] ({si+1}/{seed_list.numel()})")
+        folds = make_kfold_splits(full_idx, k=args.k, seed=int(seed))
+        group_name = f"{args.wandb_run_name or 'kfold'}-{args.model}-seed{int(seed)}"
+
+        for fold, val_idx in enumerate(folds):
+            train_idx = complement(full_idx, val_idx)
+            summary = run_one_fold(
+                base_data=data,
+                target=target,
+                train_idx=train_idx,
+                val_idx=val_idx,
+                args=args,
+                device=device,
+                fold=fold,
+                group_name=group_name,
             )
-        kept = user_seeds
-        if args.min_degree is not None and args.min_degree > 0:
-            kept = kept[deg[kept] >= args.min_degree]
-        if kept.numel() == 0:
-            raise ValueError("No seeds left after applying --seeds (+ optional degree filter).")
-        print(f"[info] using user seeds: kept={kept.numel()}")
-    else:
-        kept = (deg >= args.min_degree).nonzero(as_tuple=False).view(-1)
-        if kept.numel() == 0:
-            raise ValueError(f"No target nodes left after filtering: min_degree={args.min_degree}, mode={args.degree_mode}")
-        print(f"[info] using degree-filtered seeds: kept={kept.numel()}")
+            summary["seed"] = int(seed)
+            all_summaries.append(summary)
 
-    # build folds
-    folds = make_kfold_splits(kept, k=args.k_folds, seed=args.seed)
-
-    if args.fold is not None:
-        if args.fold < 0 or args.fold >= args.k_folds:
-            raise ValueError(f"--fold out of range: got {args.fold}, k_folds={args.k_folds}")
-        fold_list = [args.fold]
-    else:
-        fold_list = list(range(args.k_folds))
-
-    group_name = args.wandb_run_name or f"kfold_{args.k_folds}fold_seed{args.seed}"
-
-    summaries: List[Dict[str, float]] = []
-    for f in fold_list:
-        val_idx = folds[f]
-        train_idx = complement(kept, val_idx)
-
-        print(f"[info] fold={f} train={train_idx.numel()} val={val_idx.numel()}")
-
-        summ = run_one_fold(
-            base_data=base_data,
-            target=target,
-            train_idx=train_idx,
-            val_idx=val_idx,
-            args=args,
-            device=device,
-            fold=f,
-            group_name=group_name,
-        )
-        summaries.append(summ)
-
-    # write a quick summary json
-    out_dir = Path(args.save_dir) / (args.wandb_run_name or "kfold")
+    out_dir = Path(args.save_dir) / (args.wandb_run_name or "kfold") / args.model
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "kfold_summary.json"
-    out_path.write_text(json.dumps({"k_folds": args.k_folds, "seed": args.seed, "summaries": summaries}, indent=2))
-    print(f"[ok] wrote summary -> {out_path}")
-
-    # print macro avg
-    if summaries:
-        avg_base = sum(s["baseline_val_smoothl1"] for s in summaries) / len(summaries)
-        avg_best = sum(s["best_val_smoothl1"] for s in summaries) / len(summaries)
-        print(f"[summary] avg baseline val sl1={avg_base:.4f} | avg best val sl1={avg_best:.4f} | improve={avg_base - avg_best:.4f}")
+    out_path.write_text(json.dumps(all_summaries, indent=2))
+    print(f"\n[ok] wrote summary -> {out_path}")
 
 
 if __name__ == "__main__":
