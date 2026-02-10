@@ -758,6 +758,8 @@ class GraphBuilder:
             self._build_nodes_one(node_type)
 
     def _build_edges(self) -> None:
+        import torch
+
         for src_type, src_cfg in self.yaml["mappings"].items():
             links = src_cfg.get("links") or {}
             if not links:
@@ -779,6 +781,32 @@ class GraphBuilder:
                 right_on = link["right_on"]
                 edge_type = link.get("edge_type", "relates_to")
 
+                rel = (src_type, edge_type, dst_type)
+                rev_rel = (dst_type, f"rev_{edge_type}", src_type)
+
+                # -------------------------
+                # 1) 如果这个 rel 已经有边了，直接跳过
+                # -------------------------
+                ei_existing = getattr(self.data[rel], "edge_index", None)
+                if isinstance(ei_existing, torch.Tensor) and ei_existing.numel() > 0 and ei_existing.size(1) > 0:
+                    continue
+
+                # -------------------------
+                # 2) 如果这个 rel 实际上已经被“自动 reverse”覆盖了，也跳过
+                #    规则：如果 rel 的 edge_type 形如 rev_X，
+                #    且 forward (dst, X, src) 已经存在且非空，那么 rel 就别再建
+                # -------------------------
+                if isinstance(edge_type, str) and edge_type.startswith("rev_"):
+                    base = edge_type[len("rev_"):]
+                    forward = (dst_type, base, src_type)  # reverse-of-forward
+                    if forward in self.data.edge_types:
+                        ei_fwd = getattr(self.data[forward], "edge_index", None)
+                        if isinstance(ei_fwd, torch.Tensor) and ei_fwd.numel() > 0 and ei_fwd.size(1) > 0:
+                            continue
+
+                # -------------------------
+                # 3) 真正构建
+                # -------------------------
                 edge_index = build_edge_index_only(
                     left_df=src_df,
                     right_df=dst_df,
@@ -791,12 +819,15 @@ class GraphBuilder:
                     keep_order_from="left",
                 )
 
-                rel = (src_type, edge_type, dst_type)
                 self.data[rel].edge_index = edge_index
 
-                # reverse edge (optional but usually helpful)
-                rev_rel = (dst_type, f"rev_{edge_type}", src_type)
-                self.data[rev_rel].edge_index = edge_index.flip(0)
+                # -------------------------
+                # 4) reverse edge：如果已经存在就别覆盖
+                # -------------------------
+                ei_rev_existing = getattr(self.data[rev_rel], "edge_index", None)
+                if not (isinstance(ei_rev_existing, torch.Tensor) and ei_rev_existing.numel() > 0 and ei_rev_existing.size(1) > 0):
+                    self.data[rev_rel].edge_index = edge_index.flip(0)
+
 
     def _build_edges_by_shared_edge_trait(self):
         """
@@ -912,7 +943,7 @@ class GraphBuilder:
                 )
                 print(ntype, node_storage.x.shape, num_nodes)
         
-        for etype in self.data.edge_types[:10]:
+        for etype in self.data.edge_types:
             self.logger.log(
                 "graph_build_up",
                 f"{etype}: feature_shape={self.data[etype].edge_index.shape}"

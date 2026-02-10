@@ -774,7 +774,7 @@ def main():
     # loader
     parser.add_argument("--batch_size", type=int, default=2048)
     parser.add_argument("--eval_batch_size", type=int, default=4096)
-    parser.add_argument("--num_neighbors", type=int, default=15)
+    parser.add_argument("--num_neighbors", type=int, default=8)
     parser.add_argument("--num_workers", type=int, default=0)
 
     # model hparams
