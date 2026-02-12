@@ -2,10 +2,7 @@ from __future__ import annotations
 
 from logging import Logger
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
-from collections import defaultdict
-import random 
-from itertools import combinations
+from typing import Any, Dict, List, Tuple
 
 import os
 import numpy as np
@@ -22,34 +19,7 @@ from .feature_engineering import (
     #process_equipments_feature,
 )
 from .feature_schema import assignment_schema, district_schema, engineer_schema, task_schema #equipment_schema
-
-class PipelineLogger:
-    def __init__(self):
-        self.logs: Dict[str, List[str]] = defaultdict(list)
-
-    def log(self, pipeline: str, info: str) -> None:
-        self.logs[pipeline].append(info)
-
-    def dump(self, path: str | Path) -> None:
-        path = Path(path)
-
-        lines = []
-
-        for pipeline, infos in self.logs.items():
-            lines.append("=" * 14)
-            lines.append(f"(pipeline) {pipeline} :")
-            lines.append("=" * 14)
-
-            for info in infos:
-                lines.append(info)
-
-            lines.append("=" * 14)
-            lines.append("")
-
-        content = "\n".join(lines)
-
-        path.write_text(content, encoding="utf-8")
-
+from ..process.utils.pipeline_logger import PipelineLogger
 
 
 DTYPE_MAP = {
@@ -541,6 +511,8 @@ class GraphBuilder:
         return df_concat
 
     def _build_engineer_task_type_edges_from_graph(self) -> None:
+        # engineers <-> task_types
+
         # 你得把这三个 rel 改成你自己图里真实存在的 edge_types
         # 最稳的办法：print(self.data.edge_types) 看一眼再填
         rel_ea = ("engineers", "relates_to", "assignments")
@@ -564,6 +536,8 @@ class GraphBuilder:
         rel = ("engineers", "works_on_type", "task_types")
         self.data[rel].edge_index = edge_index
         self.data[("task_types", "rev_works_on_type", "engineers")].edge_index = edge_index.flip(0)
+
+        print(f"Total edges built in _build_engineer_task_type_edges_from_graph(): {edge_index.shape[1]}")
 
         self.logger.log("graph_build_up", f"{rel}: edge_index={tuple(edge_index.shape)}")
         print(rel, edge_index.shape)
@@ -795,8 +769,8 @@ class GraphBuilder:
                 self.data[rel].edge_index = edge_index
 
                 # reverse edge (optional but usually helpful)
-                rev_rel = (dst_type, f"rev_{edge_type}", src_type)
-                self.data[rev_rel].edge_index = edge_index.flip(0)
+                # rev_rel = (dst_type, f"rev_{edge_type}", src_type)
+                # self.data[rev_rel].edge_index = edge_index.flip(0)
 
     def _build_edges_by_shared_edge_trait(self):
         """
@@ -842,7 +816,7 @@ class GraphBuilder:
                 edge_group = meta.get("edge_group", "identity")  # default to identity
                 extractor = group_extractors.get(edge_group, group_identity)
                 group_vals = extractor(df[col]).alias("__group_val")
-                group_label = edge_group
+                group_label = edge_group + "_" + col
 
                 # Add group value column
                 df_with_group = df.with_columns(group_vals)
@@ -862,11 +836,11 @@ class GraphBuilder:
                     ...
                 elif edge_construct == "neighbor":
                     CustomEdgeConstructor.build_shared_edges_random_k_neighbors(
-                        groups, entity_key, id_to_idx, node_type, k=meta.get("neighbor_k", 3), max_nodes_per_group=self.MAX_NODES_PER_GROUP, data_store=self.data
+                        groups, entity_key, id_to_idx, node_type, group_label, k=meta.get("neighbor_k", 3), max_nodes_per_group=self.MAX_NODES_PER_GROUP, data_store=self.data
                     )
                 else:
                     CustomEdgeConstructor.build_shared_edges_pairwise(
-                        groups, entity_key, id_to_idx, node_type,  max_edges_per_group=self.MAX_EDGES_PER_GROUP, data_store=self.data
+                        groups, entity_key, id_to_idx, node_type, group_label, max_edges_per_group=self.MAX_EDGES_PER_GROUP, data_store=self.data
                     )
                     ...
 
@@ -932,6 +906,7 @@ class CustomEdgeConstructor:
         entity_key,
         id_to_idx,
         node_type,
+        group_label,
         k,
         data_store,
         max_nodes_per_group,
@@ -976,7 +951,7 @@ class CustomEdgeConstructor:
             return
 
         edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
-        edge_type = "random_neighbors"
+        edge_type = f"on_{group_label}"
         rel = (node_type, edge_type, node_type)
         rev_rel = (node_type, f"rev_{edge_type}", node_type)
 
@@ -994,6 +969,7 @@ class CustomEdgeConstructor:
         entity_key,
         id_to_idx,
         node_type,
+        group_label,
         max_edges_per_group,
         data_store,
     ):
@@ -1029,7 +1005,7 @@ class CustomEdgeConstructor:
             return
 
         edge_index = torch.tensor([src_indices, dst_indices], dtype=torch.long)
-        edge_type = "pairwise"
+        edge_type = f"on_{group_label}"
         rel = (node_type, edge_type, node_type)
         rev_rel = (node_type, f"rev_{edge_type}", node_type)
 

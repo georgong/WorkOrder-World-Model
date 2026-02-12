@@ -1,0 +1,1 @@
+python -m src.runner.eda --out data/analysis/eda_report.txt
