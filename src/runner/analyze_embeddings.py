@@ -578,6 +578,8 @@ def main():
     ap.add_argument("--splits", nargs="+", default=["train", "val", "test", "all"],
                      choices=["train", "val", "test", "all"],
                      help="Which splits to evaluate (default: train val test all)")
+    ap.add_argument("--skip_eval", action="store_true",
+                     help="Skip model evaluation and only perform embedding analysis")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -618,17 +620,23 @@ def main():
 
     report_lines = []
 
-    # 1. Compare models from checkpoints (no retraining)
-    comparison_report, sage_model, rgcn_model, results = compare_models_from_ckpts(
-        data, in_dims, target, train_idx, val_idx, test_idx, device,
-        sage_ckpt_path=args.sage_ckpt,
-        rgcn_ckpt_path=args.rgcn_ckpt,
-        batch_size=args.batch_size,
-        num_neighbors=args.num_neighbors,
-        layers=layers,
-        splits=args.splits,
-    )
-    report_lines.append(comparison_report)
+    if args.skip_eval:
+        # Load models without evaluation
+        print("\n[info] Skipping evaluation, loading models for embedding extraction only...")
+        sage_model, _, _, _ = load_model_from_ckpt(args.sage_ckpt, data, in_dims, device)
+        rgcn_model, _, _, _ = load_model_from_ckpt(args.rgcn_ckpt, data, in_dims, device)
+    else:
+        # 1. Compare models from checkpoints (no retraining)
+        comparison_report, sage_model, rgcn_model, results = compare_models_from_ckpts(
+            data, in_dims, target, train_idx, val_idx, test_idx, device,
+            sage_ckpt_path=args.sage_ckpt,
+            rgcn_ckpt_path=args.rgcn_ckpt,
+            batch_size=args.batch_size,
+            num_neighbors=args.num_neighbors,
+            layers=layers,
+            splits=args.splits,
+        )
+        report_lines.append(comparison_report)
 
     # 2. Extract embeddings from both models
     print("\n[info] Extracting GraphSAGE embeddings...")
