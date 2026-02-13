@@ -19,7 +19,123 @@ from tqdm import tqdm
 
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
-from src.model.gnn import HeteroSAGERegressor, HeteroGCN
+from torch_geometric.nn import HeteroConv, GraphConv
+
+from src.model.gnn import HeteroSAGERegressor
+
+# -------------------------
+# models (copied and modified from src/model/gnn.py for self-containment)
+# Don't import directly and allow modifications for analysis purposes.
+# -------------------------
+class HeteroGCN(torch.nn.Module):
+    def __init__(self, metadata, hidden, out_dim):
+        super().__init__()
+
+        self.conv1 = HeteroConv({
+            edge_type: GraphConv(-1, hidden)
+            for edge_type in metadata[1]
+        }, aggr="sum")
+
+        self.conv2 = HeteroConv({
+            edge_type: GraphConv(hidden, out_dim)
+            for edge_type in metadata[1]
+        }, aggr="sum")
+
+    def forward(self, data):
+        x_dict = self.conv1(data.x_dict, data.edge_index_dict)
+        x_dict = {k: v.relu() for k, v in x_dict.items()}
+        x_dict = self.conv2(x_dict, data.edge_index_dict)
+        return x_dict
+
+# -------------------------
+# graph subsampling for demo mode
+# -------------------------
+def subsample_hetero_graph(data: HeteroData, target: str, max_target_nodes: int = 500, seed: int = 42) -> HeteroData:
+    """Subsample a HeteroData graph to at most `max_target_nodes` target nodes
+    and only the neighbours reachable in one hop, to keep memory tiny."""
+    import copy
+
+    N = data[target].num_nodes
+    if N <= max_target_nodes:
+        print(f"[demo] target '{target}' has only {N} nodes, no subsampling needed.")
+        return data
+
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(N, generator=g)[:max_target_nodes]
+    perm, _ = perm.sort()
+
+    # Collect all nodes we need to keep per type (start with target subset)
+    keep: Dict[str, torch.Tensor] = {target: perm}
+
+    # First pass: find neighbour nodes connected to kept target nodes
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if src == target:
+            mask = torch.isin(ei[0], perm)
+            keep.setdefault(dst, []).append(ei[1][mask]) if isinstance(keep.get(dst), list) else None
+            if dst not in keep:
+                keep[dst] = ei[1][mask]
+            elif isinstance(keep[dst], list):
+                keep[dst].append(ei[1][mask])
+        if dst == target:
+            mask = torch.isin(ei[1], perm)
+            if src not in keep:
+                keep[src] = ei[0][mask]
+            elif isinstance(keep[src], list):
+                keep[src].append(ei[0][mask])
+            else:
+                keep[src] = torch.cat([keep[src], ei[0][mask]])
+
+    # Consolidate kept indices
+    for nt in list(keep.keys()):
+        v = keep[nt]
+        if isinstance(v, list):
+            v = torch.cat(v)
+        keep[nt] = torch.unique(v)
+
+    # For node types never touched, keep a small slice
+    for nt in data.node_types:
+        if nt not in keep:
+            keep[nt] = torch.arange(min(data[nt].num_nodes, 50))
+
+    # Build new data
+    new_data = HeteroData()
+
+    # Build old-to-new index maps
+    remap: Dict[str, torch.Tensor] = {}
+    for nt in data.node_types:
+        kept_idx = keep[nt]
+        n_old = data[nt].num_nodes
+        mapping = torch.full((n_old,), -1, dtype=torch.long)
+        mapping[kept_idx] = torch.arange(kept_idx.numel())
+        remap[nt] = mapping
+
+        # Copy node attributes
+        store = data[nt]
+        for key in store.keys():
+            val = store[key]
+            if isinstance(val, torch.Tensor) and val.size(0) == n_old:
+                new_data[nt][key] = val[kept_idx]
+            elif isinstance(val, torch.Tensor):
+                new_data[nt][key] = val
+        new_data[nt].num_nodes = kept_idx.numel()
+
+    # Remap edges
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        new_src = remap[src][ei[0]]
+        new_dst = remap[dst][ei[1]]
+        valid = (new_src >= 0) & (new_dst >= 0)
+        new_data[(src, rel, dst)].edge_index = torch.stack([new_src[valid], new_dst[valid]])
+
+    print(f"[demo] Subsampled graph: {N} → {keep[target].numel()} target nodes")
+    for nt in new_data.node_types:
+        print(f"  {nt}: {new_data[nt].num_nodes} nodes")
+    for et in new_data.edge_types:
+        print(f"  {et}: {new_data[et].edge_index.size(1)} edges")
+
+    return new_data
+
 
 # -------------------------
 # device
@@ -155,40 +271,45 @@ def eval_model(model, loader, target, device):
 def extract_embeddings(model, data, device, target, num_neighbors=3, layers=2, batch_size=256):
     """Extract embeddings for all node types from a trained model."""
     model.eval()
-    data = data.to(device)
 
     if isinstance(model, HeteroGCN):
-        # HeteroGCN.forward returns x_dict directly
-        x_dict = model(data)
+        # HeteroGCN is lightweight — but still avoid moving full graph if large
+        data_dev = data.to(device)
+        x_dict = model(data_dev)
         return {k: v.cpu() for k, v in x_dict.items()}
 
-    if not hasattr(model, "get_embeddings"):
-        # Fallback: run forward pass internals manually for HeteroSAGERegressor
-        x_dict = {nt: F.relu(model.in_proj[nt](data[nt].x)) for nt in model.node_types}
-        for i, conv in enumerate(model.convs):
-            x_dict = conv(x_dict, data.edge_index_dict)
-            x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
-        return {k: v.cpu() for k, v in x_dict.items()}
-
-    # For small graphs, run forward pass on full graph
-    if data[target].num_nodes < 50000:
-        emb = model.get_embeddings(data)
-        return {k: v.cpu() for k, v in emb.items()}
-
-    # For large graphs, use mini-batching
+    # --- Always use mini-batching for HeteroSAGERegressor ---
     all_idx = torch.arange(data[target].num_nodes)
     num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
     loader = NeighborLoader(
-        data, input_nodes=(target, all_idx),
-        num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        data,                          # stays on CPU
+        input_nodes=(target, all_idx),
+        num_neighbors=num_neighbors_dict,
+        batch_size=batch_size,
+        shuffle=False,
     )
-    embeddings = defaultdict(list)
+
+    # Collect per-batch embeddings only for the seed (target) nodes
+    all_embs = []
     for batch in tqdm(loader, desc="extracting embeddings"):
         batch = batch.to(device)
-        emb = model.get_embeddings(batch)
-        for nt, v in emb.items():
-            embeddings[nt].append(v.cpu())
-    return {k: torch.cat(v, dim=0) for k, v in embeddings.items()}
+        bs = batch[target].batch_size
+
+        # Reproduce the forward pass up to the last hidden layer
+        x_dict = {nt: F.relu(model.in_proj[nt](batch[nt].x)) for nt in model.node_types if nt in batch.node_types}
+        for i, conv in enumerate(model.convs):
+            x_dict = conv(x_dict, batch.edge_index_dict)
+            x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
+
+        # Only keep seed-node embeddings (first `bs` rows)
+        all_embs.append(x_dict[target][:bs].cpu())
+
+        # Free GPU memory from this batch
+        del x_dict, batch
+        torch.cuda.empty_cache() if device.type == "cuda" else None
+
+    return {target: torch.cat(all_embs, dim=0)}
+
 
 def analyze_district_department_embeddings(
     embeddings: Dict[str, torch.Tensor],
@@ -580,10 +701,20 @@ def main():
                      help="Which splits to evaluate (default: train val test all)")
     ap.add_argument("--skip_eval", action="store_true",
                      help="Skip model evaluation and only perform embedding analysis")
+    ap.add_argument("--demo", action="store_true",
+                     help="Run in demo mode with a tiny graph subset to verify the pipeline end-to-end")
+    ap.add_argument("--demo_nodes", type=int, default=500000,
+                     help="Number of target nodes to keep in demo mode (default: 500000)")
     args = ap.parse_args()
 
     device = pick_device(args.device)
     print(f"[info] device={device}")
+
+    # Override settings for demo mode
+    if args.demo:
+        print("[demo] Running in demo mode with reduced graph size")
+        args.batch_size = min(args.batch_size, 64)
+        args.num_neighbors = min(args.num_neighbors, 2)
 
     # Peek into the sage checkpoint to get training config
     sage_payload = torch.load(args.sage_ckpt, map_location="cpu", weights_only=False)
@@ -605,6 +736,10 @@ def main():
     data: HeteroData = torch.load(args.pt, map_location="cpu", weights_only=False)
     assert isinstance(data, HeteroData)
     data[target].y = data[target].y.float()
+
+    # Subsample in demo mode
+    if args.demo:
+        data = subsample_hetero_graph(data, target, max_target_nodes=args.demo_nodes, seed=seed)
 
     # Degree filter and split (using checkpoint config)
     deg = compute_target_degree(data, target, degree_mode=degree_mode)
@@ -671,5 +806,9 @@ def main():
 
 
 if __name__ == "__main__":
-    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --split val test
+    # Demo mode to ensure smooth run through:
+    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --skip_eval --demo
+
+    # Full evaluation and analysis run through 
+    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --split eval test
     main()
