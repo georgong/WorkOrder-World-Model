@@ -434,33 +434,43 @@ def compare_models_from_ckpts(
     batch_size: int = 256,
     num_neighbors: int = 3,
     layers: int = 2,
+    splits: List[str] = None,
 ):
     """Compare pre-trained GraphSAGE and RGCN models from checkpoints."""
+    if splits is None:
+        splits = ["train", "val", "test", "all"]
+
     lines = []
     lines.append("=" * 80)
     lines.append("Model Comparison: GraphSAGE vs RGCN (from checkpoints)")
+    lines.append(f"  Splits evaluated: {', '.join(splits)}")
     lines.append("=" * 80)
 
     num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
     
-    # Build loaders
-    train_loader = NeighborLoader(
-        data, input_nodes=(target, train_idx),
-        num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
-    )
-    val_loader = NeighborLoader(
-        data, input_nodes=(target, val_idx),
-        num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
-    )
-    test_loader = NeighborLoader(
-        data, input_nodes=(target, test_idx),
-        num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
-    )
-    all_idx = torch.arange(data[target].num_nodes)
-    all_loader = NeighborLoader(
-        data, input_nodes=(target, all_idx),
-        num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
-    )
+    # Build loaders only for requested splits
+    loaders = {}
+    if "train" in splits:
+        loaders["train"] = NeighborLoader(
+            data, input_nodes=(target, train_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "val" in splits:
+        loaders["val"] = NeighborLoader(
+            data, input_nodes=(target, val_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "test" in splits:
+        loaders["test"] = NeighborLoader(
+            data, input_nodes=(target, test_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "all" in splits:
+        all_idx = torch.arange(data[target].num_nodes)
+        loaders["all"] = NeighborLoader(
+            data, input_nodes=(target, all_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
 
     results = {}
     models = {}
@@ -471,18 +481,12 @@ def compare_models_from_ckpts(
     sage_epoch = sage_payload.get("epoch", "?")
     lines.append(f"  Checkpoint epoch: {sage_epoch}")
     
-    sage_train = eval_model(sage_model, train_loader, target, device)
-    sage_val = eval_model(sage_model, val_loader, target, device)
-    sage_test = eval_model(sage_model, test_loader, target, device)
-    sage_all = eval_model(sage_model, all_loader, target, device)
-    
-    results["sage"] = {"train": sage_train, "val": sage_val, "test": sage_test, "all": sage_all}
+    results["sage"] = {}
+    for split in splits:
+        results["sage"][split] = eval_model(sage_model, loaders[split], target, device)
+        r = results["sage"][split]
+        lines.append(f"  {split.capitalize():>5}: RMSE={r['rmse']:.4f}, MAE={r['mae']:.4f}, SmoothL1={r['smoothl1']:.4f}")
     models["sage"] = sage_model
-    
-    lines.append(f"  Train: RMSE={sage_train['rmse']:.4f}, MAE={sage_train['mae']:.4f}, SmoothL1={sage_train['smoothl1']:.4f}")
-    lines.append(f"  Val:   RMSE={sage_val['rmse']:.4f}, MAE={sage_val['mae']:.4f}, SmoothL1={sage_val['smoothl1']:.4f}")
-    lines.append(f"  Test:  RMSE={sage_test['rmse']:.4f}, MAE={sage_test['mae']:.4f}, SmoothL1={sage_test['smoothl1']:.4f}")
-    lines.append(f"  All:   RMSE={sage_all['rmse']:.4f}, MAE={sage_all['mae']:.4f}, SmoothL1={sage_all['smoothl1']:.4f}")
 
     # --- RGCN ---
     lines.append(f"\n[RGCN] Loading checkpoint: {rgcn_ckpt_path}")
@@ -490,29 +494,25 @@ def compare_models_from_ckpts(
     rgcn_epoch = rgcn_payload.get("epoch", "?")
     lines.append(f"  Checkpoint epoch: {rgcn_epoch}")
     
-    rgcn_train = eval_model(rgcn_model, train_loader, target, device)
-    rgcn_val = eval_model(rgcn_model, val_loader, target, device)
-    rgcn_test = eval_model(rgcn_model, test_loader, target, device)
-    rgcn_all = eval_model(rgcn_model, all_loader, target, device)
-    
-    results["rgcn"] = {"train": rgcn_train, "val": rgcn_val, "test": rgcn_test, "all": rgcn_all}
+    results["rgcn"] = {}
+    for split in splits:
+        results["rgcn"][split] = eval_model(rgcn_model, loaders[split], target, device)
+        r = results["rgcn"][split]
+        lines.append(f"  {split.capitalize():>5}: RMSE={r['rmse']:.4f}, MAE={r['mae']:.4f}, SmoothL1={r['smoothl1']:.4f}")
     models["rgcn"] = rgcn_model
-    
-    lines.append(f"  Train: RMSE={rgcn_train['rmse']:.4f}, MAE={rgcn_train['mae']:.4f}, SmoothL1={rgcn_train['smoothl1']:.4f}")
-    lines.append(f"  Val:   RMSE={rgcn_val['rmse']:.4f}, MAE={rgcn_val['mae']:.4f}, SmoothL1={rgcn_val['smoothl1']:.4f}")
-    lines.append(f"  Test:  RMSE={rgcn_test['rmse']:.4f}, MAE={rgcn_test['mae']:.4f}, SmoothL1={rgcn_test['smoothl1']:.4f}")
-    lines.append(f"  All:   RMSE={rgcn_all['rmse']:.4f}, MAE={rgcn_all['mae']:.4f}, SmoothL1={rgcn_all['smoothl1']:.4f}")
 
     # --- Comparison Table ---
     lines.append("\n" + "-" * 100)
     lines.append("Comparison Summary")
     lines.append("-" * 100)
-    header = f"{'Metric':<12} {'SAGE Train':>12} {'RGCN Train':>12} {'SAGE Val':>12} {'RGCN Val':>12} {'SAGE Test':>12} {'RGCN Test':>12} {'SAGE All':>12} {'RGCN All':>12}"
+    header = f"{'Metric':<12}"
+    for split in splits:
+        header += f" {'SAGE '+split:>12} {'RGCN '+split:>12}"
     lines.append(header)
     lines.append("-" * 100)
     for m in ["rmse", "mae", "smoothl1"]:
         row = f"{m:<12}"
-        for split in ["train", "val", "test", "all"]:
+        for split in splits:
             row += f" {results['sage'][split][m]:>12.4f} {results['rgcn'][split][m]:>12.4f}"
         lines.append(row)
     
@@ -520,7 +520,7 @@ def compare_models_from_ckpts(
     lines.append("\n" + "-" * 60)
     lines.append("Winner (lower is better)")
     lines.append("-" * 60)
-    for split in ["train", "val", "test", "all"]:
+    for split in splits:
         for m in ["rmse", "mae", "smoothl1"]:
             s = results["sage"][split][m]
             r = results["rgcn"][split][m]
@@ -553,6 +553,9 @@ def main():
     ap.add_argument("--val_ratio", type=float, default=0.1)
     ap.add_argument("--min_degree", type=int, default=1)
     ap.add_argument("--out", type=str, default="runs/analysis/embedding_analysis.txt")
+    ap.add_argument("--splits", nargs="+", default=["train", "val", "test", "all"],
+                     choices=["train", "val", "test", "all"],
+                     help="Which splits to evaluate (default: train val test all)")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -585,6 +588,7 @@ def main():
         batch_size=args.batch_size,
         num_neighbors=args.num_neighbors,
         layers=args.layers,
+        splits=args.splits,
     )
     report_lines.append(comparison_report)
 
