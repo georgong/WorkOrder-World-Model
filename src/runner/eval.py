@@ -346,10 +346,11 @@ def main():
     ap.add_argument("--pt", type=str, required=True, help="Path to graph .pt (HeteroData)")
     ap.add_argument("--ckpt_dir", type=str, required=True, help="Directory containing checkpoint .pt files")
     ap.add_argument("--device", type=str, default="auto")
-    ap.add_argument("--splits", type=str, default="val,test", help='Comma list: "train,val,test"')
+    ap.add_argument("--splits", type=str, default="val,test", help='Comma list: "train,val,test,all"')
     ap.add_argument("--eval_batch_size", type=int, default=256)
     ap.add_argument("--num_neighbors", type=int, default=3, help="Neighbors per layer for eval")
     ap.add_argument("--out_dir", type=str, default="runs/eval_results")
+    ap.add_argument("--out_name", type=str, default='results.json', help="Path to write results (overrides out_dir)")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -366,11 +367,11 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "results.jsonl"
+    out_path = out_dir / args.out_name
 
     want_splits = [s.strip() for s in args.splits.split(",") if s.strip()]
     for s in want_splits:
-        if s not in {"train", "val", "test"}:
+        if s not in {"train", "val", "test", "all"}:
             raise ValueError(f"Unknown split: {s}")
 
     # Load base graph once (we will clone per ckpt to avoid cross-ckpt mutation)
@@ -414,6 +415,9 @@ def main():
                 kept, seed=seed, train_ratio=train_ratio, val_ratio=val_ratio
             )
 
+            # "all" split uses all kept indices (degree-filtered)
+            all_idx = kept
+
             # match training: normalize features
             normalize_node_features_inplace(data, drop_const=True)
 
@@ -431,11 +435,11 @@ def main():
                 num_layers=layers,
                 target_node_type=target,
             ).to(device)
-            model.load_state_dict(payload["model_state"], strict=True)
+            model.load_state_dict(payload["model_state"], strict=False)
             model.eval()
 
             # loaders per split
-            idx_map = {"train": train_idx, "val": val_idx, "test": test_idx}
+            idx_map = {"train": train_idx, "val": val_idx, "test": test_idx, "all": all_idx}
             results = {
                 "ckpt": str(ckpt_path),
                 "ckpt_name": ckpt_path.name,
@@ -452,24 +456,29 @@ def main():
 
             line = f"[ckpt] {ckpt_path.name} (epoch={epoch})"
             for split in want_splits:
+                split_idx = idx_map[split]
                 loader = make_loader(
                     data,
                     target,
-                    idx_map[split],
+                    split_idx,
                     layers=layers,
                     num_neighbors_per_layer=int(args.num_neighbors),
                     batch_size=int(args.eval_batch_size),
                     shuffle=False,
                 )
+
+                # For baseline, always use train_idx median
                 train_y = data[target].y[train_idx].float()
                 c_med = train_y.median().item()
                 b = eval_constant_baseline_on_loader(loader, target, device, c_med, beta=1.0)
                 m = eval_loader(model, loader, target, device)
 
                 results["baseline_c_median"] = c_med
+                results[f"{split}_n"] = int(split_idx.numel())
                 results[f"{split}_mse"] = m["mse"]
                 results[f"{split}_mae"] = m["mae"]
                 results[f"{split}_rmse"] = m["rmse"]
+                results[f"{split}_smoothl1"] = m["smoothl1"]
                 results[f"{split}_b_mse"] = b["mse"]
                 results[f"{split}_b_mae"] = b["mae"]
                 results[f"{split}_b_rmse"] = b["rmse"]
@@ -481,7 +490,7 @@ def main():
                 results[f"{split}_imp_smoothl1"] = b["smoothl1"] - m["smoothl1"]
 
                 line += (
-                    f" | {split}: "
+                    f" | {split}(n={split_idx.numel()}): "
                     f"rmse={m['rmse']:.4f} (b {b['rmse']:.4f}, +{results[f'{split}_imp_rmse']:.4f}) "
                     f"mae={m['mae']:.4f} (b {b['mae']:.4f}, +{results[f'{split}_imp_mae']:.4f}) "
                     f"sl1={m['smoothl1']:.4f} (b {b['smoothl1']:.4f}, +{results[f'{split}_imp_smoothl1']:.4f})"
@@ -497,4 +506,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # example usage:
+    # python -m src.runner.eval --pt data/graph/sdge.pt --ckpt_dir runs/checkpoints
+
+    # run with all splits instead of val/test
+    # python -m src.runner.eval --pt data/graph/sdge.pt --ckpt_dir runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --splits all --out_name all_results.json
     main()
