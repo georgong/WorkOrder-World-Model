@@ -126,9 +126,15 @@ def eval_model(model, loader, target, device):
     model.eval()
     se_sum = ae_sum = sl1_sum = 0.0
     n = 0
+    is_raw_gcn = isinstance(model, HeteroGCN)
     for batch in tqdm(loader, desc="eval", leave=False):
         batch = batch.to(device)
-        pred = model(batch)["pred"]
+        if is_raw_gcn:
+            x_dict = model(batch)
+            # No learned head — just use mean of target embeddings as prediction
+            pred = x_dict[target].mean(dim=-1)
+        else:
+            pred = model(batch)["pred"]
         y = batch[target].y.float()
         bs = int(batch[target].batch_size)
         p, t = pred[:bs], y[:bs]
@@ -151,6 +157,19 @@ def extract_embeddings(model, data, device, target, num_neighbors=3, layers=2, b
     model.eval()
     data = data.to(device)
 
+    if isinstance(model, HeteroGCN):
+        # HeteroGCN.forward returns x_dict directly
+        x_dict = model(data)
+        return {k: v.cpu() for k, v in x_dict.items()}
+
+    if not hasattr(model, "get_embeddings"):
+        # Fallback: run forward pass internals manually for HeteroSAGERegressor
+        x_dict = {nt: F.relu(model.in_proj[nt](data[nt].x)) for nt in model.node_types}
+        for i, conv in enumerate(model.convs):
+            x_dict = conv(x_dict, data.edge_index_dict)
+            x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
+        return {k: v.cpu() for k, v in x_dict.items()}
+
     # For small graphs, run forward pass on full graph
     if data[target].num_nodes < 50000:
         emb = model.get_embeddings(data)
@@ -170,7 +189,6 @@ def extract_embeddings(model, data, device, target, num_neighbors=3, layers=2, b
         for nt, v in emb.items():
             embeddings[nt].append(v.cpu())
     return {k: torch.cat(v, dim=0) for k, v in embeddings.items()}
-
 
 def analyze_district_department_embeddings(
     embeddings: Dict[str, torch.Tensor],
@@ -399,23 +417,22 @@ def load_model_from_ckpt(ckpt_path: str, data: HeteroData, in_dims: Dict[str, in
     arch = ckpt_args.get("arch", "sage")
     
     if arch == "rgcn" or "rgcn" in Path(ckpt_path).name.lower():
-        model = HeteroGCN(
-            metadata=data.metadata(), in_dims=in_dims,
-            hidden_dim=hidden, num_layers=layers, target_node_type=target,
-        )
+        # Load the original HeteroGCN with the original weights
+        model = HeteroGCN(data.metadata(), hidden, hidden)
+        model.load_state_dict(payload["model_state"], strict=False)
         model_name = "RGCN"
     else:
         model = HeteroSAGERegressor(
             metadata=data.metadata(), in_dims=in_dims,
             hidden_dim=hidden, num_layers=layers, target_node_type=target,
         )
+        model.load_state_dict(payload["model_state"], strict=False)
         model_name = "GraphSAGE"
     
-    model.load_state_dict(payload["model_state"], strict=False)
     model = model.to(device)
     model.eval()
     
-    return model, model_name, payload
+    return model, model_name, payload, ckpt_args
 
 
 # -------------------------
@@ -477,10 +494,22 @@ def compare_models_from_ckpts(
 
     # --- GraphSAGE ---
     lines.append(f"\n[GraphSAGE] Loading checkpoint: {sage_ckpt_path}")
-    sage_model, sage_name, sage_payload = load_model_from_ckpt(sage_ckpt_path, data, in_dims, device)
+    sage_model, sage_name, sage_payload, ckpt_args = load_model_from_ckpt(sage_ckpt_path, data, in_dims, device)
     sage_epoch = sage_payload.get("epoch", "?")
     lines.append(f"  Checkpoint epoch: {sage_epoch}")
     
+    target = ckpt_args.get("target", "assignments")
+    seed = int(ckpt_args.get("seed", 42))
+    train_ratio = float(ckpt_args.get("train_ratio", 0.8))
+    val_ratio = float(ckpt_args.get("val_ratio", 0.1))
+    min_degree = int(ckpt_args.get("min_degree", 1))
+    degree_mode = ckpt_args.get("degree_mode", "in")
+    layers = int(ckpt_args.get("layers", 2))
+
+    print(f"[info] config from checkpoint: target={target}, seed={seed}, "
+          f"train_ratio={train_ratio}, val_ratio={val_ratio}, "
+          f"min_degree={min_degree}, degree_mode={degree_mode}, layers={layers}")
+
     results["sage"] = {}
     for split in splits:
         results["sage"][split] = eval_model(sage_model, loaders[split], target, device)
@@ -490,7 +519,7 @@ def compare_models_from_ckpts(
 
     # --- RGCN ---
     lines.append(f"\n[RGCN] Loading checkpoint: {rgcn_ckpt_path}")
-    rgcn_model, rgcn_name, rgcn_payload = load_model_from_ckpt(rgcn_ckpt_path, data, in_dims, device)
+    rgcn_model, rgcn_name, rgcn_payload, _ = load_model_from_ckpt(rgcn_ckpt_path, data, in_dims, device)
     rgcn_epoch = rgcn_payload.get("epoch", "?")
     lines.append(f"  Checkpoint epoch: {rgcn_epoch}")
     
@@ -537,21 +566,14 @@ def compare_models_from_ckpts(
 # -------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pt", type=str, help="Path to graph .pt")
+    ap.add_argument("--pt", type=str, required=True, help="Path to graph .pt")
     ap.add_argument("--sage_ckpt", type=str, default="runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt",
                      help="Path to GraphSAGE checkpoint")
     ap.add_argument("--rgcn_ckpt", type=str, default="runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt",
                      help="Path to RGCN checkpoint")
-    ap.add_argument("--target", type=str, default="assignments")
     ap.add_argument("--device", type=str, default="auto")
-    ap.add_argument("--hidden", type=int, default=64)
-    ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--batch_size", type=int, default=256)
     ap.add_argument("--num_neighbors", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--train_ratio", type=float, default=0.8)
-    ap.add_argument("--val_ratio", type=float, default=0.1)
-    ap.add_argument("--min_degree", type=int, default=1)
     ap.add_argument("--out", type=str, default="runs/analysis/embedding_analysis.txt")
     ap.add_argument("--splits", nargs="+", default=["train", "val", "test", "all"],
                      choices=["train", "val", "test", "all"],
@@ -561,16 +583,32 @@ def main():
     device = pick_device(args.device)
     print(f"[info] device={device}")
 
+    # Peek into the sage checkpoint to get training config
+    sage_payload = torch.load(args.sage_ckpt, map_location="cpu", weights_only=False)
+    ckpt_args = sage_payload.get("args", {})
+
+    target = ckpt_args.get("target", "assignments")
+    seed = int(ckpt_args.get("seed", 42))
+    train_ratio = float(ckpt_args.get("train_ratio", 0.8))
+    val_ratio = float(ckpt_args.get("val_ratio", 0.1))
+    min_degree = int(ckpt_args.get("min_degree", 1))
+    degree_mode = ckpt_args.get("degree_mode", "in")
+    layers = int(ckpt_args.get("layers", 2))
+
+    print(f"[info] config from checkpoint: target={target}, seed={seed}, "
+          f"train_ratio={train_ratio}, val_ratio={val_ratio}, "
+          f"min_degree={min_degree}, degree_mode={degree_mode}, layers={layers}")
+
     # Load data
     data: HeteroData = torch.load(args.pt, map_location="cpu", weights_only=False)
     assert isinstance(data, HeteroData)
-    data[args.target].y = data[args.target].y.float()
+    data[target].y = data[target].y.float()
 
-    # Degree filter and split
-    deg = compute_target_degree(data, args.target, degree_mode="in")
-    kept = (deg >= args.min_degree).nonzero(as_tuple=False).view(-1)
+    # Degree filter and split (using checkpoint config)
+    deg = compute_target_degree(data, target, degree_mode=degree_mode)
+    kept = (deg >= min_degree).nonzero(as_tuple=False).view(-1)
     train_idx, val_idx, test_idx = split_indices(
-        kept, seed=args.seed, train_ratio=args.train_ratio, val_ratio=args.val_ratio,
+        kept, seed=seed, train_ratio=train_ratio, val_ratio=val_ratio,
     )
 
     # Normalize and sanitize
@@ -582,12 +620,12 @@ def main():
 
     # 1. Compare models from checkpoints (no retraining)
     comparison_report, sage_model, rgcn_model, results = compare_models_from_ckpts(
-        data, in_dims, args.target, train_idx, val_idx, test_idx, device,
+        data, in_dims, target, train_idx, val_idx, test_idx, device,
         sage_ckpt_path=args.sage_ckpt,
         rgcn_ckpt_path=args.rgcn_ckpt,
         batch_size=args.batch_size,
         num_neighbors=args.num_neighbors,
-        layers=args.layers,
+        layers=layers,
         splits=args.splits,
     )
     report_lines.append(comparison_report)
@@ -595,14 +633,14 @@ def main():
     # 2. Extract embeddings from both models
     print("\n[info] Extracting GraphSAGE embeddings...")
     sage_emb = extract_embeddings(
-        sage_model, data, device, args.target,
-        num_neighbors=args.num_neighbors, layers=args.layers, batch_size=args.batch_size,
+        sage_model, data, device, target,
+        num_neighbors=args.num_neighbors, layers=layers, batch_size=args.batch_size,
     )
 
     print("[info] Extracting RGCN embeddings...")
     rgcn_emb = extract_embeddings(
-        rgcn_model, data, device, args.target,
-        num_neighbors=args.num_neighbors, layers=args.layers, batch_size=args.batch_size,
+        rgcn_model, data, device, target,
+        num_neighbors=args.num_neighbors, layers=layers, batch_size=args.batch_size,
     )
 
     # 3. Analyze district/department embeddings for both models
@@ -625,9 +663,5 @@ def main():
 
 
 if __name__ == "__main__":
-    # python -m src.runner.analyze_embeddings \
-    #   --pt data/graph/sdge.pt \
-    #   --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt \
-    #   --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt \
-    #   --out runs/analysis/embedding_analysis.txt
+    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --split val test
     main()
