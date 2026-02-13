@@ -279,36 +279,43 @@ def extract_embeddings(model, data, device, target, num_neighbors=3, layers=2, b
         return {k: v.cpu() for k, v in x_dict.items()}
 
     # --- Always use mini-batching for HeteroSAGERegressor ---
-    all_idx = torch.arange(data[target].num_nodes)
-    num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
-    loader = NeighborLoader(
-        data,                          # stays on CPU
-        input_nodes=(target, all_idx),
-        num_neighbors=num_neighbors_dict,
-        batch_size=batch_size,
-        shuffle=False,
-    )
+    result = {}
 
-    # Collect per-batch embeddings only for the seed (target) nodes
-    all_embs = []
-    for batch in tqdm(loader, desc="extracting embeddings"):
-        batch = batch.to(device)
-        bs = batch[target].batch_size
+    # Extract embeddings for each node type that has nodes
+    for ntype in data.node_types:
+        n = data[ntype].num_nodes
+        if n == 0:
+            continue
 
-        # Reproduce the forward pass up to the last hidden layer
-        x_dict = {nt: F.relu(model.in_proj[nt](batch[nt].x)) for nt in model.node_types if nt in batch.node_types}
-        for i, conv in enumerate(model.convs):
-            x_dict = conv(x_dict, batch.edge_index_dict)
-            x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
+        all_idx = torch.arange(n)
+        num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
+        loader = NeighborLoader(
+            data,
+            input_nodes=(ntype, all_idx),
+            num_neighbors=num_neighbors_dict,
+            batch_size=batch_size,
+            shuffle=False,
+        )
 
-        # Only keep seed-node embeddings (first `bs` rows)
-        all_embs.append(x_dict[target][:bs].cpu())
+        all_embs = []
+        for batch in tqdm(loader, desc=f"extracting embeddings [{ntype}]"):
+            batch = batch.to(device)
+            bs = batch[ntype].batch_size
 
-        # Free GPU memory from this batch
-        del x_dict, batch
-        torch.cuda.empty_cache() if device.type == "cuda" else None
+            x_dict = {nt: F.relu(model.in_proj[nt](batch[nt].x)) for nt in model.node_types if nt in batch.node_types}
+            for i, conv in enumerate(model.convs):
+                x_dict = conv(x_dict, batch.edge_index_dict)
+                x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
 
-    return {target: torch.cat(all_embs, dim=0)}
+            all_embs.append(x_dict[ntype][:bs].cpu())
+
+            del x_dict, batch
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        result[ntype] = torch.cat(all_embs, dim=0)
+
+    return result
 
 
 def analyze_district_department_embeddings(
@@ -806,6 +813,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # --skip_eval: just load models and analyze embeddings without running evaluation
+    # --demo: run the full pipeline on a small subsampled graph
+    # --split: specify which splits to evaluate (default: train val test all)
+
     # Demo mode to ensure smooth run through:
     # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --skip_eval --demo
 
