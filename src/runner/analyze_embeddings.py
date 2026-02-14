@@ -416,6 +416,7 @@ def analyze_district_department_embeddings(
 def analyze_district_department_combinations(
     embeddings: Dict[str, torch.Tensor],
     data: HeteroData,
+    target: str = "assignments", 
 ):
     """Analyze whether combinations of district+department form meaningful representations."""
     lines = []
@@ -440,12 +441,18 @@ def analyze_district_department_combinations(
     for etype in data.edge_types:
         src, rel, dst = etype
         ei = data[etype].edge_index
-        if src == "tasks" and dst == "districts":
+        if src == target and dst == "districts":        # <-- use target
             for i in range(ei.shape[1]):
                 task_to_district[ei[0, i].item()] = ei[1, i].item()
-        elif src == "tasks" and dst == "departments":
+        elif src == target and dst == "departments":    # <-- use target
             for i in range(ei.shape[1]):
                 task_to_department[ei[0, i].item()] = ei[1, i].item()
+        elif dst == target and src == "districts":      # <-- also check reverse edges
+            for i in range(ei.shape[1]):
+                task_to_district[ei[1, i].item()] = ei[0, i].item()
+        elif dst == target and src == "departments":    # <-- also check reverse edges
+            for i in range(ei.shape[1]):
+                task_to_department[ei[1, i].item()] = ei[0, i].item()
 
     # Build district-department combinations
     combo_to_tasks = defaultdict(list)
@@ -527,6 +534,203 @@ def analyze_district_department_combinations(
         corr, pval = pearsonr(dists, size_diffs)
         lines.append(f"\nCorrelation between embedding distance and task count difference:")
         lines.append(f"  Pearson r={corr:.4f}, p={pval:.2g}")
+
+    return "\n".join(lines)
+
+def analyze_assignment_district_department_relationship(
+    embeddings: Dict[str, torch.Tensor],
+    data: HeteroData,
+    target: str = "assignments",
+    max_samples: int = 5000,
+):
+    """Analyze whether assignments that share the same district/department
+    have more similar embeddings than random pairs.
+    This validates whether adding direct target→district/department edges would be meaningful."""
+    from sklearn.metrics.pairwise import cosine_similarity
+    from scipy.stats import mannwhitneyu
+    from collections import defaultdict
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"Assignment ↔ District/Department Relationship Analysis (via 2-hop)")
+    lines.append("=" * 80)
+
+    if target not in embeddings:
+        lines.append(f"No embeddings found for '{target}', skipping.")
+        return "\n".join(lines)
+
+    target_emb = embeddings[target]
+    n_target = target_emb.shape[0]
+
+    # --- Build 2-hop adjacency: target → intermediate → {districts, departments} ---
+    # Forward adjacency: (src_type, dst_type) -> {src_id: set(dst_ids)}
+    adj_fwd: Dict[Tuple[str, str], Dict[int, set]] = {}
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if ei.shape[1] == 0:
+            continue
+        key = (src, dst)
+        if key not in adj_fwd:
+            adj_fwd[key] = defaultdict(set)
+        for i in range(ei.shape[1]):
+            adj_fwd[key][ei[0, i].item()].add(ei[1, i].item())
+
+    def resolve_2hop(target_type: str, dest_type: str) -> Dict[int, set]:
+        """Resolve target → dest_type via 1-hop and 2-hop paths."""
+        result: Dict[int, set] = defaultdict(set)
+
+        # 1-hop
+        if (target_type, dest_type) in adj_fwd:
+            for t, dests in adj_fwd[(target_type, dest_type)].items():
+                result[t].update(dests)
+
+        # 2-hop: target → mid → dest
+        for (src1, mid), mapping1 in adj_fwd.items():
+            if src1 != target_type or mid == dest_type:
+                continue
+            if (mid, dest_type) not in adj_fwd:
+                continue
+            mapping2 = adj_fwd[(mid, dest_type)]
+            for t, mids in mapping1.items():
+                for m in mids:
+                    if m in mapping2:
+                        result[t].update(mapping2[m])
+
+        return result
+
+    for dest_type in ["districts", "departments"]:
+        lines.append(f"\n{'─' * 60}")
+        lines.append(f"  {target} → {dest_type} (2-hop resolution)")
+        lines.append(f"{'─' * 60}")
+
+        target_to_dest = resolve_2hop(target, dest_type)
+
+        if not target_to_dest:
+            lines.append(f"  No 2-hop path found from '{target}' to '{dest_type}'.")
+            continue
+
+        # Show paths found
+        paths = []
+        if (target, dest_type) in adj_fwd:
+            paths.append(f"{target} → {dest_type} (direct)")
+        for (src1, mid), _ in adj_fwd.items():
+            if src1 == target and mid != dest_type and (mid, dest_type) in adj_fwd:
+                paths.append(f"{target} → {mid} → {dest_type}")
+        lines.append(f"  Paths found: {', '.join(paths)}")
+        lines.append(f"  {target} nodes with resolved {dest_type}: {len(target_to_dest)} / {n_target}")
+
+        # Group assignments by their destination node
+        dest_to_targets: Dict[int, List[int]] = defaultdict(list)
+        for t_id, dests in target_to_dest.items():
+            for d in dests:
+                if t_id < n_target:  # guard against subsampling mismatch
+                    dest_to_targets[d].append(t_id)
+
+        # Filter groups with at least 2 members
+        valid_groups = {d: ts for d, ts in dest_to_targets.items() if len(ts) >= 2}
+        lines.append(f"  {dest_type} nodes with ≥2 assignments: {len(valid_groups)}")
+        lines.append(f"  Group sizes: min={min(len(v) for v in valid_groups.values())}, "
+                     f"max={max(len(v) for v in valid_groups.values())}, "
+                     f"mean={np.mean([len(v) for v in valid_groups.values()]):.1f}")
+
+        if len(valid_groups) < 2:
+            lines.append(f"  Too few groups for comparison.")
+            continue
+
+        # --- Compute intra-group vs inter-group cosine similarity ---
+        rng = np.random.RandomState(42)
+        intra_sims = []
+        inter_sims = []
+
+        group_keys = list(valid_groups.keys())
+
+        # Sample intra-group pairs
+        for d, members in valid_groups.items():
+            members = np.array(members)
+            if len(members) > 100:
+                members = rng.choice(members, 100, replace=False)
+            if len(members) < 2:
+                continue
+            embs = target_emb[members].numpy()
+            cs = cosine_similarity(embs)
+            # Upper triangle only (exclude diagonal)
+            idx_upper = np.triu_indices(len(members), k=1)
+            intra_sims.extend(cs[idx_upper].tolist())
+            if len(intra_sims) > max_samples:
+                break
+
+        # Sample inter-group pairs (random pairs from different groups)
+        n_inter = min(len(intra_sims), max_samples)
+        for _ in range(n_inter):
+            g1, g2 = rng.choice(len(group_keys), 2, replace=False)
+            t1 = rng.choice(valid_groups[group_keys[g1]])
+            t2 = rng.choice(valid_groups[group_keys[g2]])
+            if t1 < n_target and t2 < n_target:
+                sim = F.cosine_similarity(
+                    target_emb[t1].unsqueeze(0),
+                    target_emb[t2].unsqueeze(0),
+                ).item()
+                inter_sims.append(sim)
+
+        intra_arr = np.array(intra_sims)
+        inter_arr = np.array(inter_sims)
+
+        lines.append(f"\n  Intra-{dest_type} similarity (same {dest_type}):")
+        lines.append(f"    n={len(intra_arr)}, mean={intra_arr.mean():.4f}, "
+                     f"std={intra_arr.std():.4f}, median={np.median(intra_arr):.4f}")
+        lines.append(f"  Inter-{dest_type} similarity (different {dest_type}):")
+        lines.append(f"    n={len(inter_arr)}, mean={inter_arr.mean():.4f}, "
+                     f"std={inter_arr.std():.4f}, median={np.median(inter_arr):.4f}")
+
+        # Statistical test
+        if len(intra_arr) > 10 and len(inter_arr) > 10:
+            stat, pval = mannwhitneyu(intra_arr, inter_arr, alternative="greater")
+            effect_size = (intra_arr.mean() - inter_arr.mean()) / max(
+                np.sqrt((intra_arr.std() ** 2 + inter_arr.std() ** 2) / 2), 1e-8
+            )
+            lines.append(f"\n  Mann-Whitney U test (intra > inter):")
+            lines.append(f"    U={stat:.0f}, p={pval:.2g}")
+            lines.append(f"    Cohen's d (effect size): {effect_size:.4f}")
+
+            if pval < 0.01 and effect_size > 0.2:
+                lines.append(f"  ✅ SIGNIFICANT: Assignments sharing the same {dest_type} have MORE similar embeddings.")
+                lines.append(f"     → Adding direct {target}→{dest_type} edges is JUSTIFIED.")
+            elif pval < 0.05:
+                lines.append(f"  ⚠️  WEAK SIGNAL: Some similarity structure exists for {dest_type}.")
+                lines.append(f"     → Direct edges may help but effect is modest.")
+            else:
+                lines.append(f"  ❌ NOT SIGNIFICANT: No evidence that {dest_type} groups assignment embeddings.")
+                lines.append(f"     → Direct edges to {dest_type} may not add value.")
+
+        # --- Bonus: do district/department embeddings correlate with mean assignment embedding? ---
+        if dest_type in embeddings:
+            dest_emb = embeddings[dest_type]
+            lines.append(f"\n  {dest_type.capitalize()} embedding vs mean assignment embedding correlation:")
+            mean_target_per_dest = []
+            dest_indices = []
+            for d, members in valid_groups.items():
+                if d < dest_emb.shape[0]:
+                    mean_emb = target_emb[members].mean(dim=0)
+                    mean_target_per_dest.append(mean_emb)
+                    dest_indices.append(d)
+
+            if len(mean_target_per_dest) >= 3:
+                mean_stack = torch.stack(mean_target_per_dest).numpy()
+                dest_stack = dest_emb[dest_indices].numpy()
+                # Row-wise cosine similarity between paired vectors
+                from sklearn.metrics.pairwise import cosine_similarity as cs_fn
+                paired_sims = [cs_fn(mean_stack[i:i+1], dest_stack[i:i+1])[0, 0]
+                               for i in range(len(dest_indices))]
+                paired_arr = np.array(paired_sims)
+                lines.append(f"    Cosine similarity (mean assignment emb ↔ {dest_type} emb):")
+                lines.append(f"      mean={paired_arr.mean():.4f}, std={paired_arr.std():.4f}, "
+                             f"min={paired_arr.min():.4f}, max={paired_arr.max():.4f}")
+                if paired_arr.mean() > 0.5:
+                    lines.append(f"    ✅ High correlation: {dest_type} embeddings ENCODE assignment group structure.")
+                elif paired_arr.mean() > 0.2:
+                    lines.append(f"    ⚠️  Moderate correlation: partial alignment between {dest_type} and assignment embeddings.")
+                else:
+                    lines.append(f"    ❌ Low correlation: {dest_type} embeddings don't align with assignment groupings.")
 
     return "\n".join(lines)
 
@@ -710,7 +914,7 @@ def main():
                      help="Skip model evaluation and only perform embedding analysis")
     ap.add_argument("--demo", action="store_true",
                      help="Run in demo mode with a tiny graph subset to verify the pipeline end-to-end")
-    ap.add_argument("--demo_nodes", type=int, default=500000,
+    ap.add_argument("--demo_nodes", type=int, default=10000,
                      help="Number of target nodes to keep in demo mode (default: 500000)")
     args = ap.parse_args()
 
@@ -796,11 +1000,13 @@ def main():
     # 3. Analyze district/department embeddings for both models
     report_lines.append("\n\n--- GraphSAGE Embeddings ---")
     report_lines.append(analyze_district_department_embeddings(sage_emb, data))
-    report_lines.append(analyze_district_department_combinations(sage_emb, data))
+    # report_lines.append(analyze_district_department_combinations(sage_emb, data, target))
+    report_lines.append(analyze_assignment_district_department_relationship(sage_emb, data, target))
 
     report_lines.append("\n\n--- RGCN Embeddings ---")
     report_lines.append(analyze_district_department_embeddings(rgcn_emb, data))
-    report_lines.append(analyze_district_department_combinations(rgcn_emb, data))
+    # report_lines.append(analyze_district_department_combinations(rgcn_emb, data, target))
+    report_lines.append(analyze_assignment_district_department_relationship(rgcn_emb, data, target))
 
     # Save report
     report = "\n".join(report_lines)
