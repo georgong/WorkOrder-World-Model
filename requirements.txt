@@ -7,3 +7,8 @@ uvicorn==0.37.0
 pyyaml
 pydantic
 pyarrow
+
+# PCA / viz (for src.runner.pca_weights)
+scikit-learn
+matplotlib
+plotly

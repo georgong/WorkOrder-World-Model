@@ -322,3 +322,16 @@ bash scripts/train_gnn.sh
 python -m src.runner.interpret_subgraph
 bash scripts/visualize_interpretation.sh
 ```
+
+### Hidden-layer PCA by neighbor group (task type / engineer / districts / departments)
+After training, run PCA on checkpoint hidden activations over the dataset, grouped by neighbor-derived labels (e.g. engineer, task type, districts, departments):
+```
+python -m src.runner.pca_weights --pt path/to/graph.pt --ckpt path/to/checkpoint.pt [--split val] [--max_samples 5000] [--out_dir runs/pca_weights]
+```
+Output: `runs/pca_weights/pca_*_by_*.png` and `pca_summary.json`.
+
+**Interactive Plotly (single HTML with dropdown):**
+```
+python -m src.runner.pca_weights --pt path/to/graph.pt --ckpt path/to/checkpoint.pt --plotly [--open]
+```
+Generates `runs/pca_weights/pca_interactive.html`. Use the dropdown to switch layer × group (engineers, task_types, districts, etc.). `--open` opens it in your default browser.
