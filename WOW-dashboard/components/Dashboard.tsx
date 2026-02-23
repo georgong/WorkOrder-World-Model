@@ -15,10 +15,10 @@ type Tab = "overview" | "table" | "charts";
 export default function Dashboard({ data }: Props) {
   const [tab, setTab] = useState<Tab>("overview");
 
-  const tabs: { id: Tab; label: string; icon: string }[] = [
-    { id: "overview", label: "Overview", icon: "📊" },
-    { id: "table", label: "Assignments", icon: "📋" },
-    { id: "charts", label: "Charts", icon: "📈" },
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "table", label: "Assignments" },
+    { id: "charts", label: "Charts" },
   ];
 
   return (
@@ -61,7 +61,7 @@ export default function Dashboard({ data }: Props) {
               }
             `}
           >
-            {t.icon} {t.label}
+            {t.label}
           </button>
         ))}
       </div>

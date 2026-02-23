@@ -43,49 +43,42 @@ export default function MetricsCards({ metrics }: Props) {
       value: metrics.overall_risk_score,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
-      icon: "🎯",
     },
     {
       label: "Expected Overdue Rate",
       value: metrics.expected_overdue_rate,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
-      icon: "⏰",
     },
     {
       label: "Workload Imbalance",
       value: metrics.workload_imbalance_score,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
-      icon: "⚖️",
     },
     {
       label: "Congestion Score",
       value: metrics.congestion_score,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
-      icon: "🔥",
     },
     {
       label: "Total Assignments",
       value: metrics.total_assignments,
       fmt: (v: number) => v.toLocaleString(),
       hasBar: false,
-      icon: "📋",
     },
     {
       label: "Avg Predicted Hours",
       value: metrics.avg_predicted_hours,
       fmt: (v: number) => v.toFixed(1) + "h",
       hasBar: false,
-      icon: "⏱️",
     },
     {
       label: "Median Predicted Hours",
       value: metrics.median_predicted_hours,
       fmt: (v: number) => v.toFixed(1) + "h",
       hasBar: false,
-      icon: "📐",
     },
   ];
 
@@ -97,7 +90,6 @@ export default function MetricsCards({ metrics }: Props) {
           className={`metric-card ${c.hasBar ? riskBg(c.value) : ""}`}
         >
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-xl">{c.icon}</span>
             <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
               {c.label}
             </span>

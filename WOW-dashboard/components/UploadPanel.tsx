@@ -142,7 +142,7 @@ export default function UploadPanel({
           }}
         />
 
-        <div className="text-5xl mb-4">📄</div>
+        <div className="text-5xl mb-4"></div>
         <h2 className="text-xl font-semibold text-gray-700">
           Upload Schedule CSV
         </h2>
@@ -160,7 +160,7 @@ export default function UploadPanel({
         <div className="mt-6 bg-white rounded-xl border border-gray-200 overflow-hidden">
           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
             <span className="text-sm font-medium text-gray-700">
-              📎 {fileName}
+              {fileName}
             </span>
             <span className="text-xs text-gray-400">
               {previewRows.length > 0 ? `Showing first ${previewRows.length} rows` : ""}
@@ -237,7 +237,7 @@ export default function UploadPanel({
               Processing…
             </span>
           ) : (
-            "🚀 Analyze Schedule"
+            "Analyze Schedule"
           )}
         </button>
 
@@ -246,7 +246,7 @@ export default function UploadPanel({
           disabled={loading}
           className="px-8 py-3 rounded-lg font-semibold text-gray-700 bg-gray-100 hover:bg-gray-200 transition"
         >
-          🧪 Run Demo
+          Run Demo
         </button>
       </div>
     </div>

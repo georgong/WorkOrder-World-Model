@@ -33,7 +33,7 @@ export default function Charts({ charts, fullWidth }: Props) {
       {/* Risk Histogram */}
       <div className="metric-card">
         <h3 className="text-sm font-semibold text-gray-700 mb-4">
-          📊 Risk Score Distribution
+          Risk Score Distribution
         </h3>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
@@ -64,7 +64,7 @@ export default function Charts({ charts, fullWidth }: Props) {
       {/* Risk by District */}
       <div className="metric-card">
         <h3 className="text-sm font-semibold text-gray-700 mb-4">
-          🏘️ Average Risk by District
+          Average Risk by District
         </h3>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
@@ -97,7 +97,7 @@ export default function Charts({ charts, fullWidth }: Props) {
       {/* Workload by Engineer */}
       <div className="metric-card">
         <h3 className="text-sm font-semibold text-gray-700 mb-4">
-          👷 Workload by Engineer (Top 20)
+          Workload by Engineer (Top 20)
         </h3>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
@@ -120,7 +120,7 @@ export default function Charts({ charts, fullWidth }: Props) {
       {/* Risk by Department */}
       <div className="metric-card">
         <h3 className="text-sm font-semibold text-gray-700 mb-4">
-          🏢 Average Risk by Department
+          Average Risk by Department
         </h3>
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">

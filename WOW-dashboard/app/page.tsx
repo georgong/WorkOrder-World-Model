@@ -23,7 +23,7 @@ export default function Home() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
-                ⚡ WorkOrder Risk Dashboard
+                WorkOrder Risk Dashboard
               </h1>
               <p className="text-sm text-gray-500 mt-1">
                 GNN-powered risk analysis for SDG&E work order schedules
@@ -37,7 +37,7 @@ export default function Home() {
                 }}
                 className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition"
               >
-                ← New Upload
+                New Upload
               </button>
             )}
           </div>
@@ -49,7 +49,7 @@ export default function Home() {
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
             <div className="flex">
-              <span className="text-red-500 text-lg mr-2">⚠️</span>
+              <span className="text-red-500 text-lg mr-2"></span>
               <div>
                 <h3 className="text-sm font-medium text-red-800">Error</h3>
                 <p className="text-sm text-red-700 mt-1">{error}</p>
