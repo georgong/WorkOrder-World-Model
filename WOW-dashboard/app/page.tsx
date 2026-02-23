@@ -16,35 +16,34 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen">
+    <main className="min-h-screen bg-slate-50/50">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
+      <header className="bg-brand-blue sticky top-0 z-50 shadow-md">
+        <div className="max-w-[1440px] mx-auto px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-900">
-                WorkOrder Risk Dashboard
-              </h1>
-              <p className="text-sm text-gray-500 mt-1">
-                GNN-powered risk analysis for SDG&E work order schedules
-              </p>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-brand-green flex items-center justify-center text-white font-bold text-lg">
+                W
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-white tracking-tight">
+                  WorkOrder Risk Dashboard
+                </h1>
+                <p className="text-xs text-blue-200">
+                  SDG&E Optimisation Engine
+                </p>
+              </div>
             </div>
             {result && (
-              <button
-                onClick={() => {
-                  setResult(null);
-                  setError(null);
-                }}
-                className="px-4 py-2 text-sm font-medium text-gray-600 bg-gray-100 rounded-lg hover:bg-gray-200 transition"
-              >
-                New Upload
-              </button>
+               <div className="bg-brand-dark/30 px-3 py-1 rounded text-xs text-blue-100 font-mono">
+                  v1.2.0-stable
+               </div>
             )}
           </div>
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8">
+      <div className="max-w-[1440px] mx-auto px-4 py-8 sm:px-6 lg:px-8">
         {/* Error Banner */}
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -67,7 +66,13 @@ export default function Home() {
             setError={setError}
           />
         ) : (
-          <Dashboard data={result} />
+          <Dashboard 
+            data={result} 
+            onReset={() => {
+                setResult(null);
+                setError(null);
+            }} 
+          />
         )}
       </div>
     </main>

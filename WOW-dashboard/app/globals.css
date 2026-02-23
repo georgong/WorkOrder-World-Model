@@ -7,22 +7,42 @@
   --color-danger: #ef4444;
   --color-warning: #f59e0b;
   --color-success: #10b981;
+  --foreground-rgb: 0, 0, 0;
+  --background-rgb: 248, 250, 252;
 }
 
 body {
+  color: rgb(var(--foreground-rgb));
+  background: white; /* Changed from light gray to white for cleaner look, sections will use gray */
   min-height: 100vh;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: #cbd5e1;
   border-radius: 3px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
 
-/* Card hover */
+/* Modern Card */
 .metric-card {
-  @apply rounded-xl bg-white p-6 shadow-sm border border-gray-100 transition-shadow hover:shadow-md;
+  @apply rounded-xl bg-white p-6 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
+}
+
+/* Sidebar Link Active State */
+.sidebar-link-active {
+  @apply bg-brand-blue text-white shadow-md;
+}
+
+.sidebar-link-inactive {
+  @apply text-slate-500 hover:bg-slate-50 hover:text-brand-blue;
 }

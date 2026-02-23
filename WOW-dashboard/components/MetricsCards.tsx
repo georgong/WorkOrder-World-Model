@@ -8,14 +8,15 @@ interface Props {
 
 function riskColor(value: number): string {
   if (value >= 0.7) return "text-red-600";
-  if (value >= 0.4) return "text-amber-600";
-  return "text-emerald-600";
+  if (value >= 0.4) return "text-orange-500";
+  return "text-brand-green";
 }
 
 function riskBg(value: number): string {
-  if (value >= 0.7) return "bg-red-50 border-red-200";
-  if (value >= 0.4) return "bg-amber-50 border-amber-200";
-  return "bg-emerald-50 border-emerald-200";
+  // Keeping white backgrounds for a clean look, using borders instead
+  if (value >= 0.7) return "border-l-4 border-l-red-500";
+  if (value >= 0.4) return "border-l-4 border-l-orange-400";
+  return "border-l-4 border-l-brand-green";
 }
 
 function ProgressBar({ value, max = 1 }: { value: number; max?: number }) {
@@ -24,12 +25,12 @@ function ProgressBar({ value, max = 1 }: { value: number; max?: number }) {
     value / max >= 0.7
       ? "bg-red-500"
       : value / max >= 0.4
-      ? "bg-amber-500"
-      : "bg-emerald-500";
+      ? "bg-orange-400"
+      : "bg-brand-green";
   return (
-    <div className="w-full bg-gray-200 rounded-full h-2 mt-2">
+    <div className="w-full bg-slate-100 rounded-full h-1.5 mt-4 overflow-hidden">
       <div
-        className={`h-2 rounded-full ${color} transition-all duration-500`}
+        className={`h-full rounded-full ${color} transition-all duration-1000 ease-out`}
         style={{ width: `${pct}%` }}
       />
     </div>
@@ -83,23 +84,23 @@ export default function MetricsCards({ metrics }: Props) {
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
       {cards.map((c) => (
         <div
           key={c.label}
-          className={`metric-card ${c.hasBar ? riskBg(c.value) : ""}`}
+          className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(c.value) : "border-l-4 border-l-brand-blue"}`}
         >
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+          <div>
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">
               {c.label}
             </span>
-          </div>
-          <div
-            className={`text-2xl font-bold ${
-              c.hasBar ? riskColor(c.value) : "text-gray-900"
-            }`}
-          >
-            {c.fmt(c.value)}
+            <div
+              className={`text-3xl font-extrabold tracking-tight mt-1 ${
+                c.hasBar ? riskColor(c.value) : "text-brand-dark"
+              }`}
+            >
+              {c.fmt(c.value)}
+            </div>
           </div>
           {c.hasBar && <ProgressBar value={c.value} />}
         </div>
