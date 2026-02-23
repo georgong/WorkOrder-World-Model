@@ -4,6 +4,7 @@ import type { PredictResponse } from "@/lib/types";
 import MetricsCards from "./MetricsCards";
 import RiskTable from "./RiskTable";
 import Charts from "./Charts";
+import GraphVisualizer from "./GraphVisualizer";
 import { useState } from "react";
 
 interface Props {
@@ -11,7 +12,7 @@ interface Props {
   onReset: () => void;
 }
 
-type Tab = "overview" | "table" | "charts";
+type Tab = "overview" | "table" | "charts" | "graph";
 
 export default function Dashboard({ data, onReset }: Props) {
   const [tab, setTab] = useState<Tab>("overview");
@@ -20,6 +21,7 @@ export default function Dashboard({ data, onReset }: Props) {
     { id: "overview", label: "Overview" },
     { id: "table", label: "Assignments" },
     { id: "charts", label: "Charts" },
+    { id: "graph", label: "Network Graph" },
   ];
 
   return (
@@ -105,6 +107,20 @@ export default function Dashboard({ data, onReset }: Props) {
         {tab === "charts" && (
           <div className="fade-in">
             <Charts charts={data.charts} fullWidth />
+          </div>
+        )}
+
+        {tab === "graph" && (
+          <div className="fade-in">
+            <div className="metric-card">
+              <h3 className="text-xs font-bold text-slate-800 mb-4 uppercase tracking-wide">
+                Assignment Risk Network
+              </h3>
+              <p className="text-[10px] text-slate-500 mb-4">
+                Visualizing assignment nodes clustered by similarity. High risk nodes are red.
+              </p>
+              <GraphVisualizer predictions={data.assignment_predictions} />
+            </div>
           </div>
         )}
       </main>
