@@ -5,7 +5,7 @@ GNN-powered risk analysis dashboard for SDG&E work order schedules.
 ## Architecture
 
 ```
-capstone-dashboard/
+WOW-dashboard/
 ├── app/                    # Next.js App Router (frontend)
 │   ├── layout.tsx
 │   ├── page.tsx
@@ -35,7 +35,7 @@ capstone-dashboard/
 ### Frontend (Next.js)
 
 ```bash
-cd capstone-dashboard
+cd WOW-dashboard
 npm install
 npm run dev
 ```
@@ -45,7 +45,7 @@ Frontend runs on http://localhost:3000
 ### Backend (FastAPI)
 
 ```bash
-cd capstone-dashboard
+cd WOW-dashboard
 pip install -r requirements.txt
 uvicorn api.index:app --reload --port 8000
 ```
@@ -70,7 +70,7 @@ If model assets (`api/assets/model.pt`, `api/assets/sdge.pt`) are not present, t
 
 1. Push this folder to GitHub
 2. Import repo in [Vercel](https://vercel.com)
-3. Set root directory to `capstone-dashboard`
+3. Set root directory to `WOW-dashboard`
 4. Framework preset: **Next.js**
 5. Add model assets to `api/assets/` (optional — demo mode works without them)
 6. Deploy
