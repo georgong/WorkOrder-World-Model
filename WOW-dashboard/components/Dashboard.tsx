@@ -23,11 +23,11 @@ export default function Dashboard({ data, onReset }: Props) {
   ];
 
   return (
-    <div className="flex min-h-[calc(100vh-80px)] bg-slate-50 rounded-2xl overflow-hidden border border-slate-200 mt-4 shadow-sm">
+    <div className="flex min-h-[calc(100vh-60px)] bg-slate-50 rounded-xl overflow-hidden border border-slate-200 mt-2 shadow-sm">
       {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col">
-        <div className="p-6 border-b border-slate-100">
-          <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">
+      <aside className="w-56 bg-white border-r border-slate-200 flex flex-col">
+        <div className="p-4 border-b border-slate-100">
+          <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-3">
             Navigation
           </h2>
           <div className="space-y-1">
@@ -35,7 +35,7 @@ export default function Dashboard({ data, onReset }: Props) {
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
-                className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-all duration-200 ${
+                className={`w-full text-left px-3 py-2 rounded-md text-xs font-medium transition-all duration-200 ${
                   tab === t.id
                     ? "sidebar-link-active"
                     : "sidebar-link-inactive"
@@ -47,11 +47,11 @@ export default function Dashboard({ data, onReset }: Props) {
           </div>
         </div>
 
-        <div className="p-6 mt-auto bg-slate-50 border-t border-slate-200">
-          <h3 className="text-xs font-semibold text-slate-500 mb-2">
+        <div className="p-4 mt-auto bg-slate-50 border-t border-slate-200">
+          <h3 className="text-[10px] font-semibold text-slate-500 mb-2">
             Schedule Info
           </h3>
-          <div className="space-y-2 text-xs text-slate-500">
+          <div className="space-y-1 text-[10px] text-slate-500">
              <div className="flex justify-between">
               <span>Mode</span>
               <span className="font-mono text-slate-900">{String(data.metadata.mode || "demo")}</span>
@@ -60,10 +60,10 @@ export default function Dashboard({ data, onReset }: Props) {
               <span>Time</span>
               <span className="font-mono text-slate-900">{String(data.metadata.runtime_ms)}ms</span>
             </div>
-            {data.metadata.filename && (
+            {typeof data.metadata.filename === "string" && (
               <div className="pt-2 border-t border-slate-200 mt-2">
-                 <span className="block truncate" title={String(data.metadata.filename)}>
-                   {String(data.metadata.filename)}
+                 <span className="block truncate" title={data.metadata.filename}>
+                   {data.metadata.filename}
                  </span>
               </div>
             )}
@@ -71,7 +71,7 @@ export default function Dashboard({ data, onReset }: Props) {
           
           <button
             onClick={onReset}
-            className="mt-6 w-full py-2 px-4 border border-slate-300 rounded-lg text-xs font-semibold text-slate-600 hover:bg-white hover:text-brand-blue transition-colors"
+            className="mt-4 w-full py-1.5 px-3 border border-slate-300 rounded-md text-[10px] font-semibold text-slate-600 hover:bg-white hover:text-brand-blue transition-colors"
           >
            Upload New File
           </button>
@@ -79,18 +79,18 @@ export default function Dashboard({ data, onReset }: Props) {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 p-8 overflow-y-auto max-h-[calc(100vh-80px)]">
-        <header className="mb-8">
-          <h1 className="text-2xl font-bold text-slate-900">
+      <main className="flex-1 p-6 overflow-y-auto max-h-[calc(100vh-60px)]">
+        <header className="mb-6">
+          <h1 className="text-xl font-bold text-slate-900">
             {tabs.find(t => t.id === tab)?.label}
           </h1>
-          <p className="text-slate-500 text-sm mt-1">
+          <p className="text-slate-500 text-xs mt-0.5">
             Analyze risk factors and schedule efficiency
           </p>
         </header>
 
         {tab === "overview" && (
-          <div className="space-y-8 fade-in">
+          <div className="space-y-6 fade-in">
             <MetricsCards metrics={data.schedule_metrics} />
             <Charts charts={data.charts} />
           </div>

@@ -116,11 +116,11 @@ export default function UploadPanel({
   };
 
   return (
-    <div className="max-w-3xl mx-auto mt-12 mb-20 fade-in">
+    <div className="max-w-2xl mx-auto mt-8 mb-12 fade-in">
       {/* Upload area */}
       <div
         className={`
-          border-2 border-dashed rounded-2xl p-16 text-center transition-all cursor-pointer group
+          border-2 border-dashed rounded-xl p-10 text-center transition-all cursor-pointer group
           ${
             dragActive
               ? "border-brand-blue bg-brand-light"
@@ -146,21 +146,21 @@ export default function UploadPanel({
           }}
         />
 
-        <div className={`w-16 h-16 mx-auto mb-6 rounded-full flex items-center justify-center transition-colors ${dragActive ? 'bg-white text-brand-blue' : 'bg-brand-light text-brand-blue group-hover:bg-brand-blue group-hover:text-white'}`}>
-          <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className={`w-12 h-12 mx-auto mb-4 rounded-full flex items-center justify-center transition-colors ${dragActive ? 'bg-white text-brand-blue' : 'bg-brand-light text-brand-blue group-hover:bg-brand-blue group-hover:text-white'}`}>
+          <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
           </svg>
         </div>
         
-        <h2 className="text-2xl font-bold text-slate-800">
+        <h2 className="text-lg font-bold text-slate-800">
           Upload Schedule CSV
         </h2>
-        <p className="text-slate-500 mt-2 max-w-sm mx-auto">
+        <p className="text-xs text-slate-500 mt-2 max-w-sm mx-auto">
           Drag & drop your schedule file here, or click to browse your computer
         </p>
-        <div className="mt-8 flex gap-2 justify-center">
+        <div className="mt-6 flex gap-2 justify-center">
             {["assignment_id", "task_id", "engineer_id", "district"].map(col => (
-               <span key={col} className="px-2 py-1 bg-slate-100 text-slate-500 text-[10px] uppercase font-bold rounded">
+               <span key={col} className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[9px] uppercase font-bold rounded">
                  {col}
                </span>
             ))}
@@ -169,13 +169,13 @@ export default function UploadPanel({
 
       {/* File preview */}
       {fileName && (
-        <div className="mt-8 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-               <div className="w-8 h-8 rounded bg-brand-light text-brand-blue flex items-center justify-center font-bold text-xs">CSV</div>
+        <div className="mt-6 bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+          <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+               <div className="w-6 h-6 rounded bg-brand-light text-brand-blue flex items-center justify-center font-bold text-[10px]">CSV</div>
                <div>
-                  <div className="text-sm font-bold text-slate-700">{fileName}</div>
-                  <div className="text-xs text-slate-400">{previewRows.length} rows detected</div>
+                  <div className="text-xs font-bold text-slate-700">{fileName}</div>
+                  <div className="text-[10px] text-slate-400">{previewRows.length} rows detected</div>
                </div>
             </div>
             
@@ -183,7 +183,7 @@ export default function UploadPanel({
               onClick={(e) => { e.stopPropagation(); setSelectedFile(null); setFileName(null); }}
               className="text-slate-400 hover:text-red-500 transition-colors"
             >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
               </svg>
             </button>
@@ -191,13 +191,13 @@ export default function UploadPanel({
 
           {previewRows.length > 0 && (
             <div className="overflow-x-auto">
-              <table className="min-w-full text-xs">
+              <table className="min-w-full text-[10px]">
                 <thead className="bg-white border-b border-slate-100">
                   <tr>
                     {Object.keys(previewRows[0]).map((col) => (
                       <th
                         key={col}
-                        className="px-6 py-3 text-left font-semibold text-slate-500 uppercase tracking-wider"
+                        className="px-4 py-2 text-left font-semibold text-slate-500 uppercase tracking-wider"
                       >
                         {col}
                       </th>
@@ -208,7 +208,7 @@ export default function UploadPanel({
                   {previewRows.map((row, i) => (
                     <tr key={i} className="hover:bg-indigo-50/30 transition-colors">
                       {Object.values(row).map((val, j) => (
-                        <td key={j} className="px-6 py-3 text-slate-600 whitespace-nowrap font-mono">
+                        <td key={j} className="px-4 py-2 text-slate-600 whitespace-nowrap font-mono">
                           {String(val).substring(0, 30)}
                         </td>
                       ))}
@@ -222,12 +222,12 @@ export default function UploadPanel({
       )}
 
       {/* Action buttons */}
-      <div className="mt-8 flex gap-4 justify-center">
+      <div className="mt-6 flex gap-3 justify-center">
         <button
           onClick={handleSubmit}
           disabled={!selectedFile || loading}
           className={`
-            px-8 py-4 rounded-xl font-bold text-sm shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
+            px-6 py-3 rounded-lg font-bold text-xs shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
             ${
               !selectedFile || loading
                 ? "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
@@ -266,7 +266,7 @@ export default function UploadPanel({
         <button
           onClick={handleDemo}
           disabled={loading}
-          className="px-8 py-4 rounded-xl font-bold text-sm text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-brand-blue hover:border-brand-blue/30 transition-all transform active:scale-95"
+          className="px-6 py-3 rounded-lg font-bold text-xs text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-brand-blue hover:border-brand-blue/30 transition-all transform active:scale-95"
         >
           Try Demo Data
         </button>

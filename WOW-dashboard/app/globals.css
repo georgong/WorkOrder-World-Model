@@ -35,7 +35,7 @@ body {
 
 /* Modern Card */
 .metric-card {
-  @apply rounded-xl bg-white p-6 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
+  @apply rounded-xl bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
 }
 
 /* Sidebar Link Active State */

@@ -32,21 +32,23 @@ export default function Charts({ charts, fullWidth }: Props) {
     <div className={gridClass}>
       {/* Risk Histogram */}
       <div className="metric-card">
-        <h3 className="text-sm font-bold text-slate-800 mb-6 uppercase tracking-wide">
+        <h3 className="text-xs font-bold text-slate-800 mb-4 uppercase tracking-wide">
           Risk Score Distribution
         </h3>
-        <div className="h-64">
+        <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={charts.risk_histogram}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <XAxis
                 dataKey="bin"
-                tick={{ fontSize: 10 }}
+                tick={{ fontSize: 9, fill: '#64748b' }}
                 angle={-30}
                 textAnchor="end"
-                height={50}
+                height={40}
+                axisLine={false} 
+                tickLine={false}
               />
-              <YAxis tick={{ fontSize: 11 }} />
+              <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
               <Tooltip />
               <Bar dataKey="count" radius={[4, 4, 0, 0]}>
                 {charts.risk_histogram.map((entry, i) => (
@@ -63,21 +65,23 @@ export default function Charts({ charts, fullWidth }: Props) {
 
       {/* Risk by District */}
       <div className="metric-card">
-        <h3 className="text-sm font-bold text-slate-800 mb-6 uppercase tracking-wide">
+        <h3 className="text-xs font-bold text-slate-800 mb-4 uppercase tracking-wide">
           Average Risk by District
         </h3>
-        <div className="h-64">
+        <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={charts.risk_by_district}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <XAxis
                 dataKey="name"
-                tick={{ fontSize: 10 }}
+                tick={{ fontSize: 9, fill: '#64748b' }}
                 angle={-30}
                 textAnchor="end"
-                height={50}
+                height={40}
+                axisLine={false} 
+                tickLine={false}
               />
-              <YAxis tick={{ fontSize: 11 }} domain={[0, 1]} />
+              <YAxis tick={{ fontSize: 10, fill: '#64748b' }} domain={[0, 1]} axisLine={false} tickLine={false} />
               <Tooltip
                 formatter={(value: number) => [
                   `${(value * 100).toFixed(1)}%`,
@@ -96,10 +100,10 @@ export default function Charts({ charts, fullWidth }: Props) {
 
       {/* Workload by Engineer */}
       <div className="metric-card">
-        <h3 className="text-sm font-bold text-slate-800 mb-6 uppercase tracking-wide">
+        <h3 className="text-xs font-bold text-slate-800 mb-4 uppercase tracking-wide">
           Workload by Engineer (Top 20)
         </h3>
-        <div className="h-64">
+        <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={charts.workload_by_engineer.slice(0, 20)} layout="vertical">
               <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
@@ -121,21 +125,23 @@ export default function Charts({ charts, fullWidth }: Props) {
 
       {/* Risk by Department */}
       <div className="metric-card">
-        <h3 className="text-sm font-bold text-slate-800 mb-6 uppercase tracking-wide">
+        <h3 className="text-xs font-bold text-slate-800 mb-4 uppercase tracking-wide">
           Average Risk by Department
         </h3>
-        <div className="h-64">
+        <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={charts.risk_by_department}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <XAxis
                 dataKey="name"
-                tick={{ fontSize: 10 }}
+                tick={{ fontSize: 9, fill: '#64748b' }}
                 angle={-30}
                 textAnchor="end"
-                height={50}
+                height={40}
+                axisLine={false} 
+                tickLine={false}
               />
-              <YAxis tick={{ fontSize: 11 }} domain={[0, 1]} />
+              <YAxis tick={{ fontSize: 10, fill: '#64748b' }} domain={[0, 1]} axisLine={false} tickLine={false} />
               <Tooltip
                 formatter={(value: number) => [
                   `${(value * 100).toFixed(1)}%`,

@@ -28,7 +28,7 @@ function ProgressBar({ value, max = 1 }: { value: number; max?: number }) {
       ? "bg-orange-400"
       : "bg-brand-green";
   return (
-    <div className="w-full bg-slate-100 rounded-full h-1.5 mt-4 overflow-hidden">
+    <div className="w-full bg-slate-100 rounded-full h-1 mt-3 overflow-hidden">
       <div
         className={`h-full rounded-full ${color} transition-all duration-1000 ease-out`}
         style={{ width: `${pct}%` }}
@@ -84,18 +84,18 @@ export default function MetricsCards({ metrics }: Props) {
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
       {cards.map((c) => (
         <div
           key={c.label}
           className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(c.value) : "border-l-4 border-l-brand-blue"}`}
         >
           <div>
-            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
               {c.label}
             </span>
             <div
-              className={`text-3xl font-extrabold tracking-tight mt-1 ${
+              className={`text-2xl font-extrabold tracking-tight mt-0.5 ${
                 c.hasBar ? riskColor(c.value) : "text-brand-dark"
               }`}
             >
