@@ -4,8 +4,85 @@ from typing import List
 import math
 import polars as pl
 import numpy as np
+from pathlib import Path
+from typing import Dict, List, Optional
+import json
 
 from .feature_schema import FeatureSchema
+
+SCHEMA_DIR_DEFAULT = Path(__file__).parent.parent / "assets" / "feature_schemas"
+
+def load_feature_schema(
+    node_type: str,
+    schema_dir: Path = SCHEMA_DIR_DEFAULT,
+) -> Optional[Dict]:
+    """Load a previously saved schema. Returns None if not found."""
+    path = schema_dir / f"{node_type}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+def align_to_schema(
+    df: pl.DataFrame,
+    node_type: str,
+    schema_dir: Path = SCHEMA_DIR_DEFAULT,
+    key_cols: Optional[List[str]] = None,
+) -> pl.DataFrame:
+    """
+    Align *df* to the column schema saved during training:
+      1. Add missing columns as 0 (Float64 for numeric / UInt8 for one-hot).
+      2. Drop extra columns not in the schema.
+      3. Reorder to match the training column order.
+
+    If no saved schema is found, returns df unchanged (best-effort).
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        The feature table built on inference data.
+    node_type : str
+        Identifier matching what was used in save_feature_schema().
+    schema_dir : Path
+        Directory containing the saved JSON schemas.
+    key_cols : list[str] | None
+        Key/ID columns to always preserve regardless of schema.
+    """
+    schema = load_feature_schema(node_type, schema_dir)
+    if schema is None:
+        return df
+
+    expected_cols: List[str] = schema["columns"]
+    expected_dtypes: Dict[str, str] = schema.get("dtypes", {})
+
+    # Columns to always keep (keys) even if not in schema
+    preserve = set(key_cols or [])
+
+    current_cols = set(df.columns)
+    expected_set = set(expected_cols)
+
+    # 1) Add missing columns with zeros
+    missing = expected_set - current_cols
+    if missing:
+        fill_exprs = []
+        for col in missing:
+            dtype_str = expected_dtypes.get(col, "Float64")
+            # One-hot columns are typically UInt8
+            if "UInt8" in dtype_str or "Bool" in dtype_str:
+                fill_exprs.append(pl.lit(0, dtype=pl.UInt8).alias(col))
+            else:
+                fill_exprs.append(pl.lit(0.0, dtype=pl.Float64).alias(col))
+        df = df.with_columns(fill_exprs)
+
+    # 2) Build final column order: expected columns + any preserve cols not already there
+    final_cols = list(expected_cols)
+    for c in preserve:
+        if c in df.columns and c not in expected_set:
+            final_cols.append(c)
+
+    # Only select columns that actually exist now
+    final_cols = [c for c in final_cols if c in df.columns]
+
+    return df.select(final_cols)
 
 def _add_time_features(
     df: pl.DataFrame,
@@ -285,6 +362,9 @@ def process_task_feature(
 
     task_feat = task_feat.drop([f"{prefix}_DUEDATE", f"{prefix}_SCHEDULEDFINISH", f"{prefix}_SCHEDULEDSTART"])
 
+    # Align to training-time schema (pad missing one-hot cols, drop extras)
+    task_feat = align_to_schema(task_feat, node_type="tasks", key_cols=[f"{prefix}_{k}" for k in schema.key_cols])
+
     return task_feat
 
 
@@ -325,7 +405,10 @@ def process_assignment_feature(
     )
     
     assignment_feat = assignment_feat.drop([f"{prefix}_STARTTIME"])
-    
+
+    # Align to training-time schema
+    assignment_feat = align_to_schema(assignment_feat, node_type="assignments", key_cols=[f"{prefix}_{k}" for k in schema.key_cols])
+
     return assignment_feat
 
 
@@ -360,6 +443,9 @@ def process_engineer_feature(
         top_k_per_cat=30,
     )
 
+    # Align to training-time schema
+    engineer_feat = align_to_schema(engineer_feat, node_type="engineers", key_cols=[f"{prefix}_{k}" for k in schema.key_cols])
+
     return engineer_feat
 
 
@@ -390,6 +476,9 @@ def process_districts_feature(
         prefix=prefix,
         top_k_per_cat=30,
     )
+
+    # Align to training-time schema
+    districts_feat = align_to_schema(districts_feat, node_type="districts", key_cols=[f"{prefix}_{k}" for k in schema.key_cols])
 
     return districts_feat
 
