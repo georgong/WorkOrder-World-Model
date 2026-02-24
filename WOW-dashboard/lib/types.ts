@@ -20,15 +20,15 @@ export interface AssignmentPrediction {
 }
 
 export interface ChartData {
-  risk_histogram: Record<string, unknown>[];
-  risk_by_district: Record<string, unknown>[];
-  workload_by_engineer: Record<string, unknown>[];
-  risk_by_department: Record<string, unknown>[];
+  risk_histogram: Record<string, any>[];
+  risk_by_district: Record<string, any>[];
+  workload_by_engineer: Record<string, any>[];
+  risk_by_department: Record<string, any>[];
 }
 
 export interface PredictResponse {
   schedule_metrics: ScheduleMetrics;
   assignment_predictions: AssignmentPrediction[];
   charts: ChartData;
-  metadata: Record<string, unknown>;
+  metadata: Record<string, any>;
 }
