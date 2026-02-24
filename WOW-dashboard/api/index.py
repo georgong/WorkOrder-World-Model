@@ -348,7 +348,12 @@ def _run_graph_inference(graph, records: List[Dict]) -> Dict:
     out = model(data)
 
     if isinstance(out, dict):
-        preds_all = (out.get("pred") or out.get("assignments") or next(iter(out.values()))).cpu().numpy()
+        raw = out.get("pred")
+        if raw is None:
+            raw = out.get("assignments")
+        if raw is None:
+            raw = next(iter(out.values()))
+        preds_all = raw.cpu().numpy()
     else:
         preds_all = out.cpu().numpy()
 

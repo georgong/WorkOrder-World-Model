@@ -46,20 +46,8 @@ export default function MetricsCards({ metrics }: Props) {
       hasBar: true,
     },
     {
-      label: "Expected Overdue Rate",
-      value: metrics.expected_overdue_rate,
-      fmt: (v: number) => (v * 100).toFixed(1) + "%",
-      hasBar: true,
-    },
-    {
       label: "Workload Imbalance",
       value: metrics.workload_imbalance_score,
-      fmt: (v: number) => (v * 100).toFixed(1) + "%",
-      hasBar: true,
-    },
-    {
-      label: "Congestion Score",
-      value: metrics.congestion_score,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
     },
