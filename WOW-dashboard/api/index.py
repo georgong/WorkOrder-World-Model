@@ -45,6 +45,64 @@ _device = torch.device("cpu")
 
 MODEL_VERSION = "v1"
 
+# ── Demo data generation ────────────────────────────────────────────────────
+DEMO_DISTRICTS = ["North", "South", "East", "West", "Central", "Downtown", "Suburb-A", "Suburb-B"]
+DEMO_DEPARTMENTS = ["Electrical", "Plumbing", "HVAC", "Structural", "General Maintenance", "Landscaping"]
+DEMO_ENGINEERS = [f"ENG-{i:03d}" for i in range(1, 16)]
+DEMO_TASK_TYPES = ["Repair", "Inspection", "Installation", "Replacement", "Emergency"]
+DEMO_STATUSES = ["Scheduled", "In Progress", "Pending Parts", "On Hold"]
+
+NUM_DEMO_ASSIGNMENTS = 60
+
+
+def _generate_demo_records() -> List[Dict[str, Any]]:
+    """Generate a list of realistic-looking assignment records."""
+    rng = np.random.default_rng(seed=2024)
+    records = []
+    for i in range(NUM_DEMO_ASSIGNMENTS):
+        district = rng.choice(DEMO_DISTRICTS)
+        department = rng.choice(DEMO_DEPARTMENTS)
+        engineer = rng.choice(DEMO_ENGINEERS)
+        task_type = rng.choice(DEMO_TASK_TYPES)
+        status = rng.choice(DEMO_STATUSES)
+
+        # Base duration depends on task type
+        base_hours = {
+            "Repair": 4.0, "Inspection": 1.5, "Installation": 6.0,
+            "Replacement": 5.0, "Emergency": 3.0,
+        }[task_type]
+        duration = max(0.5, base_hours + rng.normal(0, base_hours * 0.4))
+
+        records.append({
+            "assignment_id": f"WO-{2024_0000 + i:08d}",
+            "district": district,
+            "DISTRICT": district,
+            "department": department,
+            "DEPARTMENT": department,
+            "engineer_id": engineer,
+            "ASSIGNEDENGINEERS": engineer,
+            "task_type": task_type,
+            "status": status,
+            "duration": round(duration, 2),
+        })
+    return records
+
+
+def _generate_demo_predictions(records: List[Dict[str, Any]]) -> np.ndarray:
+    """Produce synthetic predicted completion hours that correlate with record attributes."""
+    rng = np.random.default_rng(seed=2025)
+    preds = []
+    for r in records:
+        base = r["duration"]
+        # Add district-based noise (some districts are "harder")
+        district_offset = {"Downtown": 2.0, "Central": 1.5, "East": 1.0}.get(r["district"], 0.0)
+        # Emergency tasks often take longer than estimated
+        emergency_bump = 2.5 if r["task_type"] == "Emergency" else 0.0
+        noise = rng.normal(0, 1.0)
+        pred = max(0.3, base + district_offset + emergency_bump + noise)
+        preds.append(pred)
+    return np.array(preds)
+
 
 # ── Pydantic schemas ────────────────────────────────────────────────────────
 class ScheduleMetrics(BaseModel):
@@ -312,6 +370,39 @@ def _run_graph_inference(graph, records: List[Dict]) -> Dict:
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "model_version": MODEL_VERSION}
+
+
+@app.get("/api/demo", response_model=PredictResponse)
+async def demo():
+    """
+    Demo endpoint — returns realistic synthetic predictions without requiring
+    file uploads or a trained model.  Useful for frontend development and demos.
+    """
+    t0 = time.time()
+    request_id = str(uuid.uuid4())[:8]
+
+    records = _generate_demo_records()
+    preds = _generate_demo_predictions(records)
+    result = _build_result_from_predictions(preds, records)
+
+    elapsed_ms = int((time.time() - t0) * 1000)
+
+    return PredictResponse(
+        schedule_metrics=ScheduleMetrics(**result["schedule_metrics"]),
+        assignment_predictions=[
+            AssignmentPrediction(**p) for p in result["assignment_predictions"]
+        ],
+        charts=ChartData(**result["charts"]),
+        metadata={
+            "runtime_ms": elapsed_ms,
+            "model_version": MODEL_VERSION,
+            "request_id": request_id,
+            "session_id": "demo",
+            "mode": "demo",
+            "num_assignments": NUM_DEMO_ASSIGNMENTS,
+            "note": "Synthetic data — no real model inference was performed.",
+        },
+    )
 
 
 @app.post("/api/predict")
