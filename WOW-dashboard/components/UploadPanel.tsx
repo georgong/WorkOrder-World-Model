@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { predictFromCSV, predictFromJSON } from "@/lib/api-client";
+import { predictFromGraphFiles, REQUIRED_FILES } from "@/lib/api-client";
+import type { RequiredFileName } from "@/lib/api-client";
 import type { PredictResponse } from "@/lib/types";
 
 interface Props {
@@ -11,6 +12,17 @@ interface Props {
   setError: (msg: string | null) => void;
 }
 
+/** Friendly display labels for each dataset */
+const FILE_LABELS: Record<RequiredFileName, string> = {
+  "W6ASSIGNMENTS.csv": "Assignments",
+  "W6DEPARTMENT.csv": "Departments",
+  "W6DISTRICTS.csv": "Districts",
+  "W6ENGINEERS.csv": "Engineers",
+  "W6TASK_STATUSES.csv": "Task Statuses",
+  "W6TASK_TYPES.csv": "Task Types",
+  "W6TASKS.csv": "Tasks",
+};
+
 export default function UploadPanel({
   onResult,
   loading,
@@ -19,62 +31,79 @@ export default function UploadPanel({
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [previewRows, setPreviewRows] = useState<Record<string, string>[]>([]);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<Partial<Record<RequiredFileName, File>>>(
+    {}
+  );
 
-  const parseCSV = (text: string): Record<string, string>[] => {
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(",").map((h) => h.trim().replace(/"/g, ""));
-    return lines.slice(1, 6).map((line) => {
-      const values = line.split(",").map((v) => v.trim().replace(/"/g, ""));
-      const row: Record<string, string> = {};
-      headers.forEach((h, i) => {
-        row[h] = values[i] || "";
-      });
-      return row;
-    });
+  const uploadedCount = Object.keys(files).length;
+  const allUploaded = uploadedCount === REQUIRED_FILES.length;
+
+  /** Try to match a File to a required canonical name */
+  const matchFile = (file: File): RequiredFileName | null => {
+    const upper = file.name.toUpperCase();
+    for (const req of REQUIRED_FILES) {
+      if (upper === req.toUpperCase()) return req;
+      // Also match without extension or with prefix
+      const stem = req.replace(".csv", "").toUpperCase();
+      if (upper.startsWith(stem)) return req;
+    }
+    return null;
   };
 
-  const handleFile = useCallback(
-    (file: File) => {
+  const addFiles = useCallback(
+    (incoming: FileList | File[]) => {
       setError(null);
-      if (!file.name.endsWith(".csv")) {
-        setError("Please upload a .csv file");
-        return;
-      }
-      setFileName(file.name);
-      setSelectedFile(file);
+      const next = { ...files };
+      const unmatched: string[] = [];
 
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const text = e.target?.result as string;
-        const rows = parseCSV(text);
-        setPreviewRows(rows);
-      };
-      reader.readAsText(file);
+      Array.from(incoming).forEach((file) => {
+        if (!file.name.toLowerCase().endsWith(".csv")) {
+          unmatched.push(`${file.name} (not a CSV)`);
+          return;
+        }
+        const key = matchFile(file);
+        if (key) {
+          next[key] = file;
+        } else {
+          unmatched.push(file.name);
+        }
+      });
+
+      setFiles(next);
+
+      if (unmatched.length > 0) {
+        setError(
+          `Could not match: ${unmatched.join(", ")}. Expected filenames: ${REQUIRED_FILES.join(", ")}`
+        );
+      }
     },
-    [setError]
+    [files, setError]
   );
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragActive(false);
-      const file = e.dataTransfer.files[0];
-      if (file) handleFile(file);
+      if (e.dataTransfer.files.length > 0) {
+        addFiles(e.dataTransfer.files);
+      }
     },
-    [handleFile]
+    [addFiles]
   );
 
+  const removeFile = (key: RequiredFileName) => {
+    const next = { ...files };
+    delete next[key];
+    setFiles(next);
+  };
+
   const handleSubmit = async () => {
-    if (!selectedFile) return;
+    if (!allUploaded) return;
     setLoading(true);
     setError(null);
 
     try {
-      const result = await predictFromCSV(selectedFile);
+      const result = await predictFromGraphFiles(files as Record<RequiredFileName, File>);
       onResult(result);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Unknown error";
@@ -84,43 +113,28 @@ export default function UploadPanel({
     }
   };
 
-  const handleDemo = async () => {
-    setLoading(true);
+  const handleReset = () => {
+    setFiles({});
     setError(null);
-
-    // Generate sample records for demo
-    const demoRecords = Array.from({ length: 50 }, (_, i) => ({
-      assignment_id: `A${String(i + 1).padStart(4, "0")}`,
-      task_id: `T${String(Math.floor(i / 2) + 1).padStart(4, "0")}`,
-      engineer_id: `ENG${String((i % 10) + 1).padStart(3, "0")}`,
-      district: `District ${(i % 5) + 1}`,
-      department: `Dept ${(i % 3) + 1}`,
-      start_time: new Date(
-        2026,
-        1,
-        20 + Math.floor(i / 10),
-        8 + (i % 8)
-      ).toISOString(),
-      duration: 1 + Math.random() * 10,
-    }));
-
-    try {
-      const result = await predictFromJSON(demoRecords);
-      onResult(result);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
   };
 
   return (
-    <div className="max-w-2xl mx-auto mt-8 mb-12 fade-in">
-      {/* Upload area */}
+    <div className="max-w-3xl mx-auto mt-8 mb-12 fade-in">
+      {/* Header */}
+      <div className="text-center mb-6">
+        <h2 className="text-xl font-bold text-slate-800">
+          Upload Work Order Datasets
+        </h2>
+        <p className="text-sm text-slate-500 mt-1">
+          Upload all 7 required CSV files to build the graph and run risk
+          analysis
+        </p>
+      </div>
+
+      {/* Drop zone */}
       <div
         className={`
-          border-2 border-dashed rounded-xl p-10 text-center transition-all cursor-pointer group
+          border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer group
           ${
             dragActive
               ? "border-brand-blue bg-brand-light"
@@ -139,97 +153,182 @@ export default function UploadPanel({
           ref={fileInputRef}
           type="file"
           accept=".csv"
+          multiple
           className="hidden"
           onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (file) handleFile(file);
+            if (e.target.files && e.target.files.length > 0) {
+              addFiles(e.target.files);
+            }
+            // Reset so re-selecting same files triggers onChange
+            e.target.value = "";
           }}
         />
 
-        <div className={`w-12 h-12 mx-auto mb-4 rounded-full flex items-center justify-center transition-colors ${dragActive ? 'bg-white text-brand-blue' : 'bg-brand-light text-brand-blue group-hover:bg-brand-blue group-hover:text-white'}`}>
-          <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+        <div
+          className={`w-12 h-12 mx-auto mb-3 rounded-full flex items-center justify-center transition-colors ${
+            dragActive
+              ? "bg-white text-brand-blue"
+              : "bg-brand-light text-brand-blue group-hover:bg-brand-blue group-hover:text-white"
+          }`}
+        >
+          <svg
+            className="w-6 h-6"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+            />
           </svg>
         </div>
-        
-        <h2 className="text-lg font-bold text-slate-800">
-          Upload Schedule CSV
-        </h2>
-        <p className="text-xs text-slate-500 mt-2 max-w-sm mx-auto">
-          Drag & drop your schedule file here, or click to browse your computer
+
+        <p className="text-sm font-semibold text-slate-700">
+          Drag &amp; drop CSV files here, or click to browse
         </p>
-        <div className="mt-6 flex gap-2 justify-center">
-            {["assignment_id", "task_id", "engineer_id", "district"].map(col => (
-               <span key={col} className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[9px] uppercase font-bold rounded">
-                 {col}
-               </span>
-            ))}
-        </div>
+        <p className="text-xs text-slate-400 mt-1">
+          Select all 7 files at once, or add them one by one
+        </p>
       </div>
 
-      {/* File preview */}
-      {fileName && (
-        <div className="mt-6 bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
-          <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-               <div className="w-6 h-6 rounded bg-brand-light text-brand-blue flex items-center justify-center font-bold text-[10px]">CSV</div>
-               <div>
-                  <div className="text-xs font-bold text-slate-700">{fileName}</div>
-                  <div className="text-[10px] text-slate-400">{previewRows.length} rows detected</div>
-               </div>
-            </div>
-            
-            <button 
-              onClick={(e) => { e.stopPropagation(); setSelectedFile(null); setFileName(null); }}
-              className="text-slate-400 hover:text-red-500 transition-colors"
+      {/* File checklist */}
+      <div className="mt-6 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-600">
+              Required Datasets
+            </span>
+            <span
+              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                allUploaded
+                  ? "bg-green-100 text-green-700"
+                  : "bg-amber-100 text-amber-700"
+              }`}
             >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
+              {uploadedCount} / {REQUIRED_FILES.length}
+            </span>
           </div>
-
-          {previewRows.length > 0 && (
-            <div className="overflow-x-auto">
-              <table className="min-w-full text-[10px]">
-                <thead className="bg-white border-b border-slate-100">
-                  <tr>
-                    {Object.keys(previewRows[0]).map((col) => (
-                      <th
-                        key={col}
-                        className="px-4 py-2 text-left font-semibold text-slate-500 uppercase tracking-wider"
-                      >
-                        {col}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50 bg-slate-50/30">
-                  {previewRows.map((row, i) => (
-                    <tr key={i} className="hover:bg-indigo-50/30 transition-colors">
-                      {Object.values(row).map((val, j) => (
-                        <td key={j} className="px-4 py-2 text-slate-600 whitespace-nowrap font-mono">
-                          {String(val).substring(0, 30)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          {uploadedCount > 0 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleReset();
+              }}
+              className="text-[10px] font-semibold text-slate-400 hover:text-red-500 transition-colors"
+            >
+              Clear All
+            </button>
           )}
         </div>
-      )}
 
-      {/* Action buttons */}
-      <div className="mt-6 flex gap-3 justify-center">
+        <ul className="divide-y divide-slate-100">
+          {REQUIRED_FILES.map((reqFile) => {
+            const file = files[reqFile];
+            const isUploaded = !!file;
+
+            return (
+              <li
+                key={reqFile}
+                className={`px-4 py-2.5 flex items-center justify-between transition-colors ${
+                  isUploaded ? "bg-green-50/40" : "bg-white"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  {/* Status icon */}
+                  <div
+                    className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
+                      isUploaded
+                        ? "bg-green-500 text-white"
+                        : "bg-slate-200 text-slate-400"
+                    }`}
+                  >
+                    {isUploaded ? (
+                      <svg
+                        className="w-3 h-3"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={3}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M5 13l4 4L19 7"
+                        />
+                      </svg>
+                    ) : (
+                      <svg
+                        className="w-3 h-3"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M12 4v16m8-8H4"
+                        />
+                      </svg>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="text-xs font-semibold text-slate-700">
+                      {FILE_LABELS[reqFile]}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-mono">
+                      {isUploaded ? file.name : reqFile}
+                    </div>
+                  </div>
+                </div>
+
+                {isUploaded && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-slate-400">
+                      {(file.size / 1024).toFixed(0)} KB
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeFile(reqFile);
+                      }}
+                      className="text-slate-300 hover:text-red-500 transition-colors"
+                    >
+                      <svg
+                        className="w-3.5 h-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M6 18L18 6M6 6l12 12"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      {/* Submit button */}
+      <div className="mt-6 flex justify-center">
         <button
           onClick={handleSubmit}
-          disabled={!selectedFile || loading}
+          disabled={!allUploaded || loading}
           className={`
-            px-6 py-3 rounded-lg font-bold text-xs shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
+            px-8 py-3 rounded-lg font-bold text-sm shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
             ${
-              !selectedFile || loading
+              !allUploaded || loading
                 ? "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
                 : "bg-brand-blue text-white hover:bg-brand-dark hover:-translate-y-0.5"
             }
@@ -256,19 +355,18 @@ export default function UploadPanel({
                   className="opacity-75"
                 />
               </svg>
-              Evaluating Risks...
+              Building Graph &amp; Analyzing...
             </span>
           ) : (
-            "Analyze Schedule"
+            <>
+              Analyze Schedule
+              {!allUploaded && (
+                <span className="ml-2 text-[10px] opacity-60">
+                  ({REQUIRED_FILES.length - uploadedCount} files remaining)
+                </span>
+              )}
+            </>
           )}
-        </button>
-
-        <button
-          onClick={handleDemo}
-          disabled={loading}
-          className="px-6 py-3 rounded-lg font-bold text-xs text-slate-600 bg-white border border-slate-200 hover:bg-slate-50 hover:text-brand-blue hover:border-brand-blue/30 transition-all transform active:scale-95"
-        >
-          Try Demo Data
         </button>
       </div>
     </div>

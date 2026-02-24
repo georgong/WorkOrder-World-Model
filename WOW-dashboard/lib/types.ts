@@ -19,29 +19,11 @@ export interface AssignmentPrediction {
   top_factors: string[];
 }
 
-export interface HistogramBin {
-  bin: string;
-  count: number;
-  binStart: number;
-  binEnd: number;
-}
-
-export interface GroupedMetric {
-  name: string;
-  avg_risk: number;
-  count: number;
-}
-
-export interface WorkloadEntry {
-  name: string;
-  assignments: number;
-}
-
 export interface ChartData {
-  risk_histogram: HistogramBin[];
-  risk_by_district: GroupedMetric[];
-  workload_by_engineer: WorkloadEntry[];
-  risk_by_department: GroupedMetric[];
+  risk_histogram: Record<string, unknown>[];
+  risk_by_district: Record<string, unknown>[];
+  workload_by_engineer: Record<string, unknown>[];
+  risk_by_department: Record<string, unknown>[];
 }
 
 export interface PredictResponse {

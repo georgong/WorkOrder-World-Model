@@ -30,14 +30,20 @@ export default function Home() {
                   WorkOrder Risk Dashboard
                 </h1>
                 <p className="text-[10px] text-blue-200">
-                  SDG&E Optimisation Engine
+                  SDG&amp;E Graph-Based Risk Engine
                 </p>
               </div>
             </div>
             {result && (
-               <div className="bg-brand-dark/30 px-2 py-0.5 rounded text-[10px] text-blue-100 font-mono">
-                  v1.2.0-stable
-               </div>
+              <button
+                onClick={() => {
+                  setResult(null);
+                  setError(null);
+                }}
+                className="text-[10px] font-semibold text-blue-200 hover:text-white bg-brand-dark/30 px-3 py-1 rounded transition-colors"
+              >
+                ← New Analysis
+              </button>
             )}
           </div>
         </div>
@@ -48,7 +54,7 @@ export default function Home() {
         {error && (
           <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
             <div className="flex">
-              <span className="text-red-500 text-lg mr-2"></span>
+              <span className="text-red-500 text-lg mr-2">⚠</span>
               <div>
                 <h3 className="text-sm font-medium text-red-800">Error</h3>
                 <p className="text-sm text-red-700 mt-1">{error}</p>
@@ -66,12 +72,12 @@ export default function Home() {
             setError={setError}
           />
         ) : (
-          <Dashboard 
-            data={result} 
+          <Dashboard
+            data={result}
             onReset={() => {
-                setResult(null);
-                setError(null);
-            }} 
+              setResult(null);
+              setError(null);
+            }}
           />
         )}
       </div>
