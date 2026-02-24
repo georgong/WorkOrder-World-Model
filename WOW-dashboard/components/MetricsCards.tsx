@@ -1,6 +1,7 @@
 "use client";
 
 import type { ScheduleMetrics } from "@/lib/types";
+import { useState } from "react";
 
 interface Props {
   metrics: ScheduleMetrics;
@@ -37,8 +38,53 @@ function ProgressBar({ value, max = 1 }: { value: number; max?: number }) {
   );
 }
 
+const metricExplanations: Record<string, string> = {
+  "Total Assignments":
+    "The count of all work assignments included in the current schedule.",
+  "Overall Risk Score":
+    "Calculated as the proportion of assignments predicted to exceed 8 hours for completion. Higher means more assignments are at risk of being overdue.",
+  "Workload Imbalance":
+    "Measured using the Gini coefficient on the number of assignments per engineer. Higher values indicate a more uneven distribution.",
+  "Avg Predicted Hours":
+    "The mean predicted task completion time for all assignments, based on model inference.",
+  "Median Predicted Hours":
+    "The median predicted task completion time for all assignments, based on model inference.",
+};
+
+function InfoTooltip({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="relative ml-1 select-none">
+      <button
+        type="button"
+        aria-label="Info"
+        className="align-top text-xs text-slate-500 hover:text-brand-blue focus:outline-none"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        tabIndex={0}
+        style={{ lineHeight: 1 }}
+      >
+        ?
+      </button>
+      {open && (
+        <span className="absolute z-10 left-1/2 -translate-x-1/2 top-6 min-w-[180px] bg-white border border-slate-200 shadow-lg rounded px-2 py-1 text-xs text-slate-700">
+          {text}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function MetricsCards({ metrics }: Props) {
   const cards = [
+    {
+      label: "Total Assignments",
+      value: metrics.total_assignments,
+      fmt: (v: number) => v.toLocaleString(),
+      hasBar: false,
+    },
     {
       label: "Overall Risk Score",
       value: metrics.overall_risk_score,
@@ -50,12 +96,6 @@ export default function MetricsCards({ metrics }: Props) {
       value: metrics.workload_imbalance_score,
       fmt: (v: number) => (v * 100).toFixed(1) + "%",
       hasBar: true,
-    },
-    {
-      label: "Total Assignments",
-      value: metrics.total_assignments,
-      fmt: (v: number) => v.toLocaleString(),
-      hasBar: false,
     },
     {
       label: "Avg Predicted Hours",
@@ -78,17 +118,18 @@ export default function MetricsCards({ metrics }: Props) {
           key={c.label}
           className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(c.value) : "border-l-4 border-l-brand-blue"}`}
         >
-          <div>
+          <div className="flex items-start justify-between">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
               {c.label}
             </span>
-            <div
-              className={`text-2xl font-extrabold tracking-tight mt-0.5 ${
-                c.hasBar ? riskColor(c.value) : "text-brand-dark"
-              }`}
-            >
-              {c.fmt(c.value)}
-            </div>
+            <InfoTooltip text={metricExplanations[c.label]} />
+          </div>
+          <div
+            className={`text-2xl font-extrabold tracking-tight mt-0.5 ${
+              c.hasBar ? riskColor(c.value) : "text-brand-dark"
+            }`}
+          >
+            {c.fmt(c.value)}
           </div>
           {c.hasBar && <ProgressBar value={c.value} />}
         </div>
