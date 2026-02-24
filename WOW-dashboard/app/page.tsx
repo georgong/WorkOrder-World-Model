@@ -1,54 +1,52 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import UploadPanel from "@/components/UploadPanel";
 import Dashboard from "@/components/Dashboard";
+import { fetchDemo } from "@/lib/api";
+import { useSetHeader } from "@/lib/header-context";
 import type { PredictResponse } from "@/lib/types";
 
 export default function Home() {
   const [result, setResult] = useState<PredictResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const setHeader = useSetHeader();
+
+  const resetAll = () => {
+    setResult(null);
+    setError(null);
+  };
+
+  // Keep header in sync with page state
+  useEffect(() => {
+    setHeader({
+      hasResult: !!result,
+      isDemo: result?.metadata?.mode === "demo",
+      onReset: resetAll,
+    });
+  }, [result, setHeader]);
 
   const handleResult = (data: PredictResponse) => {
     setResult(data);
     setError(null);
   };
 
+  const handleDemo = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchDemo();
+      setResult(data);
+    } catch (e: any) {
+      setError(e.message ?? "Failed to load demo data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <main className="min-h-screen bg-slate-50/50">
-      {/* Header */}
-      <header className="bg-brand-blue sticky top-0 z-50 shadow-md">
-        <div className="max-w-[1440px] mx-auto px-4 py-2 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-6 h-6 rounded bg-brand-green flex items-center justify-center text-white font-bold text-sm">
-                W
-              </div>
-              <div>
-                <h1 className="text-sm font-bold text-white tracking-tight">
-                  WorkOrder Risk Dashboard
-                </h1>
-                <p className="text-[10px] text-blue-200">
-                  SDG&amp;E Graph-Based Risk Engine
-                </p>
-              </div>
-            </div>
-            {result && (
-              <button
-                onClick={() => {
-                  setResult(null);
-                  setError(null);
-                }}
-                className="text-[10px] font-semibold text-blue-200 hover:text-white bg-brand-dark/30 px-3 py-1 rounded transition-colors"
-              >
-                ← New Analysis
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
       <div className="max-w-[1440px] mx-auto px-4 py-4 sm:px-6 lg:px-8">
         {/* Error Banner */}
         {error && (
@@ -67,6 +65,7 @@ export default function Home() {
         {!result ? (
           <UploadPanel
             onResult={handleResult}
+            onDemo={handleDemo}
             loading={loading}
             setLoading={setLoading}
             setError={setError}
@@ -74,10 +73,7 @@ export default function Home() {
         ) : (
           <Dashboard
             data={result}
-            onReset={() => {
-              setResult(null);
-              setError(null);
-            }}
+            onReset={resetAll}
           />
         )}
       </div>

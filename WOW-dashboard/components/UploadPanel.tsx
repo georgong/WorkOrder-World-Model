@@ -1,12 +1,13 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { predictFromGraphFiles, REQUIRED_FILES } from "@/lib/api-client";
-import type { RequiredFileName } from "@/lib/api-client";
+import { predictFromGraphFiles, REQUIRED_FILES } from "@/lib/api";
+import type { RequiredFileName } from "@/lib/api";
 import type { PredictResponse } from "@/lib/types";
 
 interface Props {
   onResult: (data: PredictResponse) => void;
+  onDemo: () => void;
   loading: boolean;
   setLoading: (v: boolean) => void;
   setError: (msg: string | null) => void;
@@ -25,6 +26,7 @@ const FILE_LABELS: Record<RequiredFileName, string> = {
 
 export default function UploadPanel({
   onResult,
+  onDemo,
   loading,
   setLoading,
   setError,
@@ -43,7 +45,6 @@ export default function UploadPanel({
     const upper = file.name.toUpperCase();
     for (const req of REQUIRED_FILES) {
       if (upper === req.toUpperCase()) return req;
-      // Also match without extension or with prefix
       const stem = req.replace(".csv", "").toUpperCase();
       if (upper.startsWith(stem)) return req;
     }
@@ -123,12 +124,54 @@ export default function UploadPanel({
       {/* Header */}
       <div className="text-center mb-6">
         <h2 className="text-xl font-bold text-slate-800">
-          Upload Work Order Datasets
+          WorkOrder Risk Analysis
         </h2>
         <p className="text-sm text-slate-500 mt-1">
           Upload all 7 required CSV files to build the graph and run risk
-          analysis
+          analysis, or try a demo with synthetic data.
         </p>
+      </div>
+
+      {/* Demo CTA */}
+      <div className="text-center mb-6">
+        <button
+          onClick={onDemo}
+          disabled={loading}
+          className={`
+            inline-flex items-center gap-2 px-8 py-3 rounded-lg font-bold text-sm shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
+            ${
+              loading
+                ? "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
+                : "bg-gradient-to-r from-emerald-500 to-teal-500 text-white hover:from-emerald-600 hover:to-teal-600"
+            }
+          `}
+        >
+          {loading ? (
+            <span className="flex items-center gap-2">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75" />
+              </svg>
+              Loading demo data…
+            </span>
+          ) : (
+            <>
+              Try Demo Mode
+            </>
+          )}
+        </button>
+        <p className="text-xs text-slate-400 mt-2">
+          Generates 200 synthetic work orders data
+        </p>
+      </div>
+
+      {/* Divider */}
+      <div className="flex items-center gap-4 mb-6">
+        <div className="flex-1 h-px bg-slate-200" />
+        <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">
+          or upload your data
+        </span>
+        <div className="flex-1 h-px bg-slate-200" />
       </div>
 
       {/* Drop zone */}
@@ -141,10 +184,7 @@ export default function UploadPanel({
               : "border-slate-200 bg-white hover:border-brand-blue hover:bg-slate-50"
           }
         `}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragActive(true);
-        }}
+        onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
         onDragLeave={() => setDragActive(false)}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
@@ -159,7 +199,6 @@ export default function UploadPanel({
             if (e.target.files && e.target.files.length > 0) {
               addFiles(e.target.files);
             }
-            // Reset so re-selecting same files triggers onChange
             e.target.value = "";
           }}
         />
@@ -171,18 +210,8 @@ export default function UploadPanel({
               : "bg-brand-light text-brand-blue group-hover:bg-brand-blue group-hover:text-white"
           }`}
         >
-          <svg
-            className="w-6 h-6"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
-            />
+          <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
           </svg>
         </div>
 
@@ -198,25 +227,14 @@ export default function UploadPanel({
       <div className="mt-6 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="px-4 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-slate-600">
-              Required Datasets
-            </span>
-            <span
-              className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
-                allUploaded
-                  ? "bg-green-100 text-green-700"
-                  : "bg-amber-100 text-amber-700"
-              }`}
-            >
+            <span className="text-xs font-bold text-slate-600">Required Datasets</span>
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${allUploaded ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}>
               {uploadedCount} / {REQUIRED_FILES.length}
             </span>
           </div>
           {uploadedCount > 0 && (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleReset();
-              }}
+              onClick={(e) => { e.stopPropagation(); handleReset(); }}
               className="text-[10px] font-semibold text-slate-400 hover:text-red-500 transition-colors"
             >
               Clear All
@@ -232,84 +250,35 @@ export default function UploadPanel({
             return (
               <li
                 key={reqFile}
-                className={`px-4 py-2.5 flex items-center justify-between transition-colors ${
-                  isUploaded ? "bg-green-50/40" : "bg-white"
-                }`}
+                className={`px-4 py-2.5 flex items-center justify-between transition-colors ${isUploaded ? "bg-green-50/40" : "bg-white"}`}
               >
                 <div className="flex items-center gap-3">
-                  {/* Status icon */}
-                  <div
-                    className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
-                      isUploaded
-                        ? "bg-green-500 text-white"
-                        : "bg-slate-200 text-slate-400"
-                    }`}
-                  >
+                  <div className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${isUploaded ? "bg-green-500 text-white" : "bg-slate-200 text-slate-400"}`}>
                     {isUploaded ? (
-                      <svg
-                        className="w-3 h-3"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={3}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M5 13l4 4L19 7"
-                        />
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                       </svg>
                     ) : (
-                      <svg
-                        className="w-3 h-3"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2}
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          d="M12 4v16m8-8H4"
-                        />
+                      <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
                       </svg>
                     )}
                   </div>
-
                   <div>
-                    <div className="text-xs font-semibold text-slate-700">
-                      {FILE_LABELS[reqFile]}
-                    </div>
-                    <div className="text-[10px] text-slate-400 font-mono">
-                      {isUploaded ? file.name : reqFile}
-                    </div>
+                    <div className="text-xs font-semibold text-slate-700">{FILE_LABELS[reqFile]}</div>
+                    <div className="text-[10px] text-slate-400 font-mono">{isUploaded ? file.name : reqFile}</div>
                   </div>
                 </div>
 
                 {isUploaded && (
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] text-slate-400">
-                      {(file.size / 1024).toFixed(0)} KB
-                    </span>
+                    <span className="text-[10px] text-slate-400">{(file.size / 1024).toFixed(0)} KB</span>
                     <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeFile(reqFile);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); removeFile(reqFile); }}
                       className="text-slate-300 hover:text-red-500 transition-colors"
                     >
-                      <svg
-                        className="w-3.5 h-3.5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M6 18L18 6M6 6l12 12"
-                        />
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     </button>
                   </div>
@@ -321,54 +290,30 @@ export default function UploadPanel({
       </div>
 
       {/* Submit button */}
-      <div className="mt-6 flex justify-center">
-        <button
-          onClick={handleSubmit}
-          disabled={!allUploaded || loading}
-          className={`
-            px-8 py-3 rounded-lg font-bold text-sm shadow-[0_4px_14px_0_rgba(1,21,139,0.39)] transition-all transform active:scale-95
-            ${
-              !allUploaded || loading
-                ? "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
-                : "bg-brand-blue text-white hover:bg-brand-dark hover:-translate-y-0.5"
-            }
-          `}
-        >
-          {loading ? (
-            <span className="flex items-center gap-2">
-              <svg
-                className="animate-spin h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <circle
-                  cx="12"
-                  cy="12"
-                  r="10"
-                  stroke="currentColor"
-                  strokeWidth="4"
-                  className="opacity-25"
-                />
-                <path
-                  fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-                  className="opacity-75"
-                />
-              </svg>
-              Building Graph &amp; Analyzing...
-            </span>
-          ) : (
-            <>
-              Analyze Schedule
-              {!allUploaded && (
-                <span className="ml-2 text-[10px] opacity-60">
-                  ({REQUIRED_FILES.length - uploadedCount} files remaining)
-                </span>
-              )}
-            </>
-          )}
-        </button>
-      </div>
+      <button
+        onClick={handleSubmit}
+        disabled={!allUploaded || loading}
+        className={`
+          mt-6 w-full py-3 rounded-lg font-bold text-sm shadow-md transition-all transform active:scale-95
+          ${
+            !allUploaded || loading
+              ? "bg-slate-200 text-slate-400 shadow-none cursor-not-allowed"
+              : "bg-brand-blue text-white hover:shadow-lg"
+          }
+        `}
+      >
+        {loading ? (
+          <span className="flex items-center justify-center gap-2">
+            <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+              <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" className="opacity-75" />
+            </svg>
+            Analyzing…
+          </span>
+        ) : (
+          `Run Analysis (${uploadedCount}/${REQUIRED_FILES.length} files)`
+        )}
+      </button>
     </div>
   );
 }
