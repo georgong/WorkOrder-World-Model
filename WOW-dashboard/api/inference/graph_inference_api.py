@@ -35,9 +35,12 @@ EXPECTED_FILES = [
 # Default paths — override via function args or env vars
 DEFAULT_CONFIG_PATH = os.environ.get(
     "GRAPH_YAML_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "..", "configs", "graph.yaml"),
+    os.path.join(os.path.dirname(__file__), "..", "assets", "graph.yaml"),
 )
-DEFAULT_MODEL_PATH = os.environ.get("MODEL_PATH", "models/best_model.pt")
+DEFAULT_MODEL_PATH = os.environ.get(
+    "MODEL_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "assets", "model.pt"),
+)
 DEFAULT_UPLOAD_ROOT = os.environ.get("UPLOAD_ROOT", "data/uploads")
 
 

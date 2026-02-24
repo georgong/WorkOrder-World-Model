@@ -79,13 +79,15 @@ class PredictResponse(BaseModel):
 
 
 # ── Model loading ───────────────────────────────────────────────────────────
+_ASSETS_DIR = Path(__file__).parent / "assets"
+
+
 def _find_asset(name: str) -> Path:
     """Search common locations for an asset file."""
     candidates = [
-        Path(__file__).parent / "assets" / name,
+        _ASSETS_DIR / name,
         Path(__file__).parent.parent / "data" / "graph" / name,
         Path("data/graph") / name,
-        Path("api/assets") / name,
     ]
     for p in candidates:
         if p.exists():
