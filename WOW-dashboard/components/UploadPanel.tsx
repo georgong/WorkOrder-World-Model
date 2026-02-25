@@ -3,10 +3,10 @@
 import { useCallback, useRef, useState } from "react";
 import { predictFromGraphFiles, REQUIRED_FILES } from "@/lib/api";
 import type { RequiredFileName } from "@/lib/api";
-import type { PredictResponse } from "@/lib/types";
+import type { PredictResponse, GraphResponse } from "@/lib/types";
 
 interface Props {
-  onResult: (data: PredictResponse) => void;
+  onResult: (data: PredictResponse, graph?: GraphResponse | null) => void;
   onDemo: () => void;
   loading: boolean;
   setLoading: (v: boolean) => void;
@@ -105,7 +105,31 @@ export default function UploadPanel({
 
     try {
       const result = await predictFromGraphFiles(files as Record<RequiredFileName, File>);
-      onResult(result);
+
+      // Also request the serialized graph from the backend using the uploaded files
+      const form = new FormData();
+      for (const [key, file] of Object.entries(files as Record<RequiredFileName, File>)) {
+        const paramName = key.replace(".csv", "");
+        form.append(paramName, file);
+      }
+      // max_nodes is expected as a query param by the backend
+      let graph: GraphResponse | null = null;
+      try {
+        const gr = await fetch(`/api/graph?max_nodes=300`, {
+          method: "POST",
+          body: form,
+        });
+        if (gr.ok) {
+          graph = await gr.json();
+        } else {
+          const body = await gr.text();
+          console.warn("Graph request failed:", gr.status, body);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch graph:", err);
+      }
+
+      onResult(result, graph);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setError(msg);

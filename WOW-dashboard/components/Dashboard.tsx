@@ -111,7 +111,7 @@ export default function Dashboard({ data, onReset }: Props) {
         )}
 
         {tab === "graph" && (
-          <div className="fade-in">
+            <div className="fade-in">
             <div className="metric-card">
               <h3 className="text-xs font-bold text-slate-800 mb-2 uppercase tracking-wide">
                 Assignment Risk Network
@@ -119,7 +119,11 @@ export default function Dashboard({ data, onReset }: Props) {
               <p className="text-[10px] text-slate-500 mb-2">
                 Visualizing assignment nodes clustered by similarity. High risk nodes are red.
               </p>
-              <GraphVisualizer predictions={data.assignment_predictions} />
+              <GraphVisualizer
+                predictions={data.assignment_predictions}
+                // Pass through any graph found in metadata (set by UploadPanel)
+                graph={data.metadata?.graph}
+              />
             </div>
           </div>
         )}

@@ -133,6 +133,12 @@ class PredictResponse(BaseModel):
     charts: ChartData
     metadata: Dict[str, Any]
 
+class GraphResponse(BaseModel):
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]]
+    node_types: List[str]
+    edge_types: List[str]
+
 
 # ── Model loading ───────────────────────────────────────────────────────────
 _ASSETS_DIR = Path(__file__).parent / "assets"
@@ -609,6 +615,129 @@ async def predict(
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Graph build / inference error: {str(e)}")
+    finally:
+        if staging_dir.exists():
+            shutil.rmtree(staging_dir, ignore_errors=True)
+
+# ── Graph serialization for visualization ──────────────────────────────────
+def serialize_graph(graph, max_nodes=300):
+    """
+    Serialize the constructed graph to a node/edge list for visualization.
+    If the graph is too large, sample a subgraph centered on assignments.
+    """
+    import random
+    # Collect all nodes
+    nodes = []
+    node_id_map = {}  # (type, idx) -> global id
+    node_types = list(graph.node_types)
+    node_count = 0
+    for ntype in node_types:
+        ns = graph[ntype]
+        for i in range(ns.num_nodes):
+            node_id = f"{ntype}:{getattr(ns, 'node_ids', [str(i)]*ns.num_nodes)[i]}"
+            node = {
+                "id": node_id,
+                "type": ntype,
+                "label": str(getattr(ns, 'node_ids', [str(i)]*ns.num_nodes)[i]),
+            }
+            nodes.append(node)
+            node_id_map[(ntype, i)] = node_id
+            node_count += 1
+
+    # If too many nodes, sample a subgraph centered on assignments
+    if node_count > max_nodes and "assignments" in node_types:
+        # Sample a subset of assignments
+        assign_ns = graph["assignments"]
+        num_assign = assign_ns.num_nodes
+        sample_size = min(max_nodes // 3, num_assign)
+        sample_idxs = set(random.sample(range(num_assign), sample_size))
+        keep_nodes = set()
+        for idx in sample_idxs:
+            keep_nodes.add(node_id_map[("assignments", idx)])
+        # Add neighbors via edges
+        for etype in graph.edge_types:
+            ei = graph[etype].edge_index
+            src_type, _, dst_type = etype
+            for src, dst in zip(ei[0], ei[1]):
+                src_id = node_id_map.get((src_type, int(src)))
+                dst_id = node_id_map.get((dst_type, int(dst)))
+                if src_type == "assignments" and src_id in keep_nodes:
+                    keep_nodes.add(dst_id)
+                if dst_type == "assignments" and dst_id in keep_nodes:
+                    keep_nodes.add(src_id)
+        # Filter nodes
+        nodes = [n for n in nodes if n["id"] in keep_nodes]
+
+    # Collect all edges
+    edges = []
+    for etype in graph.edge_types:
+        ei = graph[etype].edge_index
+        src_type, rel, dst_type = etype
+        for src, dst in zip(ei[0], ei[1]):
+            src_id = node_id_map.get((src_type, int(src)))
+            dst_id = node_id_map.get((dst_type, int(dst)))
+            if src_id is not None and dst_id is not None:
+                edges.append({
+                    "source": src_id,
+                    "target": dst_id,
+                    "type": rel,
+                    "source_type": src_type,
+                    "target_type": dst_type,
+                })
+    return {"nodes": nodes, "edges": edges, "node_types": node_types, "edge_types": [str(e) for e in graph.edge_types]}
+
+# ── Graph API endpoint ─────────────────────────────────────────────────────
+@app.post("/api/graph")
+async def get_graph(
+    W6ASSIGNMENTS: UploadFile = File(...),
+    W6DEPARTMENT: UploadFile = File(...),
+    W6DISTRICTS: UploadFile = File(...),
+    W6ENGINEERS: UploadFile = File(...),
+    W6TASK_STATUSES: UploadFile = File(...),
+    W6TASK_TYPES: UploadFile = File(...),
+    W6TASKS: UploadFile = File(...),
+    config_path: str = Query(DEFAULT_CONFIG_PATH, description="Path to graph YAML config"),
+    max_nodes: int = 300,
+):
+    """
+    Returns the constructed graph (nodes and edges) for visualization.
+    If the graph is too large, samples a subgraph.
+    """
+    session_id = uuid.uuid4().hex[:12]
+    staging_dir = Path(DEFAULT_UPLOAD_ROOT) / session_id
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    uploads = {
+        "W6ASSIGNMENTS.csv": W6ASSIGNMENTS,
+        "W6DEPARTMENT.csv": W6DEPARTMENT,
+        "W6DISTRICTS.csv": W6DISTRICTS,
+        "W6ENGINEERS.csv": W6ENGINEERS,
+        "W6TASK_STATUSES.csv": W6TASK_STATUSES,
+        "W6TASK_TYPES.csv": W6TASK_TYPES,
+        "W6TASKS.csv": W6TASKS,
+    }
+    try:
+        for canonical_name, upload_file in uploads.items():
+            _save_upload_to_disk(upload_file, staging_dir / canonical_name)
+        missing = validate_data_dir(staging_dir)
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing required CSV file(s): {missing}. "
+                       f"Expected all of: {EXPECTED_FILES}",
+            )
+        graph = build_graph_from_dir(staging_dir, config_path=config_path, save_path=None)
+        graph_json = serialize_graph(graph, max_nodes=max_nodes)
+        return GraphResponse(
+            nodes=graph_json['nodes'], 
+            edges=graph_json['edges'],
+            node_types=graph_json['node_types'],
+            edge_types=graph_json['edge_types']
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Graph build/serialization error: {str(e)}")
     finally:
         if staging_dir.exists():
             shutil.rmtree(staging_dir, ignore_errors=True)

@@ -1,4 +1,4 @@
-import type { PredictResponse } from "./types";
+import type { PredictResponse, GraphResponse} from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -39,6 +39,19 @@ export async function predictFromGraphFiles(
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Predict request failed (${res.status}): ${body}`);
+  }
+  return res.json();
+}
+
+export async function fetchGraph(max_nodes: number = 300): Promise<GraphResponse> {
+  const res = await fetch(`${API_BASE}/api/graph`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ max_nodes }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Graph request failed (${res.status}): ${body}`);
   }
   return res.json();
 }

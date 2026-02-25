@@ -27,8 +27,10 @@ export default function Home() {
     });
   }, [result, setHeader]);
 
-  const handleResult = (data: PredictResponse) => {
-    setResult(data);
+  const handleResult = (data: PredictResponse, graph?: any) => {
+    // Attach graph (if provided) into metadata so it can be passed down
+    const withGraph = { ...data, metadata: { ...(data.metadata || {}), graph } };
+    setResult(withGraph as PredictResponse);
     setError(null);
   };
 

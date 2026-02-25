@@ -33,3 +33,10 @@ export interface PredictResponse {
   charts: ChartData;
   metadata: Record<string, any>;
 }
+
+export interface GraphResponse {
+  nodes: any[];
+  edges: any[];
+  node_types: string[];
+  edge_types: string[];
+}
