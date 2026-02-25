@@ -49,6 +49,12 @@ const metricExplanations: Record<string, string> = {
     "The mean predicted task completion time for all assignments, based on model inference.",
   "Median Predicted Hours":
     "The median predicted task completion time for all assignments, based on model inference.",
+  "Most Overloaded Engineer":
+    "The engineer assigned the most tasks in the current schedule.",
+  "District with Highest Average Risk":
+    "The district whose assignments have the highest average predicted risk score.",
+  "Department with Highest Average Risk":
+    "The department whose assignments have the highest average predicted risk score.",
 };
 
 function InfoTooltip({ text }: { text: string }) {
@@ -109,6 +115,24 @@ export default function MetricsCards({ metrics }: Props) {
       fmt: (v: number) => v.toFixed(1) + "h",
       hasBar: false,
     },
+    {
+      label: "Most Overloaded Engineer",
+      value: metrics.most_overloaded_engineer,
+      fmt: (v: string) => v,
+      hasBar: false,
+    },
+    {
+      label: "District with Highest Average Risk",
+      value: metrics.highest_risk_district,
+      fmt: (v: string) => v,
+      hasBar: false,
+    },
+    {
+      label: "Department with Highest Average Risk",
+      value: metrics.highest_risk_department,
+      fmt: (v: string) => v,
+      hasBar: false,
+    },
   ];
 
   return (
@@ -116,7 +140,7 @@ export default function MetricsCards({ metrics }: Props) {
       {cards.map((c) => (
         <div
           key={c.label}
-          className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(c.value) : "border-l-4 border-l-brand-blue"}`}
+          className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(Number(c.value)) : "border-l-4 border-l-brand-blue"}`}
         >
           <div className="flex items-start justify-between">
             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
@@ -126,12 +150,12 @@ export default function MetricsCards({ metrics }: Props) {
           </div>
           <div
             className={`text-2xl font-extrabold tracking-tight mt-0.5 ${
-              c.hasBar ? riskColor(c.value) : "text-brand-dark"
+              c.hasBar ? riskColor(Number(c.value)) : "text-brand-dark"
             }`}
           >
             {c.fmt(c.value)}
           </div>
-          {c.hasBar && <ProgressBar value={c.value} />}
+          {c.hasBar && <ProgressBar value={Number(c.value)} />}
         </div>
       ))}
     </div>

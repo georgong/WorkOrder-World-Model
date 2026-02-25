@@ -4,12 +4,13 @@
 
 export interface ScheduleMetrics {
   overall_risk_score: number;
-  expected_overdue_rate: number;
   workload_imbalance_score: number;
-  congestion_score: number;
   total_assignments: number;
   avg_predicted_hours: number;
   median_predicted_hours: number;
+  most_overloaded_engineer: string;
+  highest_risk_district: string;
+  highest_risk_department: string;
 }
 
 export interface AssignmentPrediction {
