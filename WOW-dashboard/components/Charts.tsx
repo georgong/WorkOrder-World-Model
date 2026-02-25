@@ -28,6 +28,11 @@ export default function Charts({ charts, fullWidth }: Props) {
     ? "grid grid-cols-1 gap-6"
     : "grid grid-cols-1 lg:grid-cols-2 gap-6";
 
+  // Sort risk_by_district descending by avg_risk
+  const sortedRiskByDistrict = [...charts.risk_by_district].sort(
+    (a, b) => b.avg_risk - a.avg_risk
+  );
+
   return (
     <div className={gridClass}>
       {/* Risk Histogram */}
@@ -70,7 +75,7 @@ export default function Charts({ charts, fullWidth }: Props) {
         </h3>
         <div className="h-48">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={charts.risk_by_district}>
+            <BarChart data={sortedRiskByDistrict}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <XAxis
                 dataKey="name"
@@ -89,7 +94,7 @@ export default function Charts({ charts, fullWidth }: Props) {
                 ]}
               />
               <Bar dataKey="avg_risk" radius={[4, 4, 0, 0]}>
-                {charts.risk_by_district.map((entry, i) => (
+                {sortedRiskByDistrict.map((entry, i) => (
                   <Cell key={i} fill={riskFill(entry.avg_risk)} />
                 ))}
               </Bar>
