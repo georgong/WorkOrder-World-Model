@@ -9,12 +9,14 @@
   --color-success: #10b981;
   --foreground-rgb: 0, 0, 0;
   --background-rgb: 248, 250, 252;
+  --base-font-size: 13px;
 }
 
 body {
   color: rgb(var(--foreground-rgb));
-  background: white; /* Changed from light gray to white for cleaner look, sections will use gray */
+  background: white;
   min-height: 100vh;
+  font-size: var(--base-font-size);
 }
 
 /* Custom scrollbar */
@@ -35,7 +37,7 @@ body {
 
 /* Modern Card */
 .metric-card {
-  @apply rounded-xl bg-white p-4 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
+  @apply rounded-lg bg-white p-2 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
 }
 
 /* Sidebar Link Active State */

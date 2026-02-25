@@ -47,15 +47,15 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-50/50">
-      <div className="max-w-[1440px] mx-auto px-4 py-4 sm:px-6 lg:px-8">
+      <div className="max-w-[1100px] mx-auto px-2 py-2 sm:px-3 lg:px-4">
         {/* Error Banner */}
         {error && (
-          <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg">
+          <div className="mb-3 p-2 bg-red-50 border border-red-200 rounded-lg">
             <div className="flex">
               <span className="text-red-500 text-lg mr-2">⚠</span>
               <div>
-                <h3 className="text-sm font-medium text-red-800">Error</h3>
-                <p className="text-sm text-red-700 mt-1">{error}</p>
+                <h3 className="text-xs font-medium text-red-800">Error</h3>
+                <p className="text-xs text-red-700 mt-1">{error}</p>
               </div>
             </div>
           </div>

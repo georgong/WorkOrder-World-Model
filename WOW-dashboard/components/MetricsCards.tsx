@@ -29,7 +29,7 @@ function ProgressBar({ value, max = 1 }: { value: number; max?: number }) {
       ? "bg-orange-400"
       : "bg-brand-green";
   return (
-    <div className="w-full bg-slate-100 rounded-full h-1 mt-3 overflow-hidden">
+    <div className="w-full bg-slate-100 rounded-full h-[6px] mt-2 overflow-hidden">
       <div
         className={`h-full rounded-full ${color} transition-all duration-1000 ease-out`}
         style={{ width: `${pct}%` }}
@@ -136,20 +136,20 @@ export default function MetricsCards({ metrics }: Props) {
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
       {cards.map((c) => (
         <div
           key={c.label}
-          className={`metric-card flex flex-col justify-between ${c.hasBar ? riskBg(Number(c.value)) : "border-l-4 border-l-brand-blue"}`}
+          className={`metric-card flex flex-col justify-between p-2 ${c.hasBar ? riskBg(Number(c.value)) : "border-l-4 border-l-brand-blue"}`}
         >
           <div className="flex items-start justify-between">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
               {c.label}
             </span>
             <InfoTooltip text={metricExplanations[c.label]} />
           </div>
           <div
-            className={`text-2xl font-extrabold tracking-tight mt-0.5 ${
+            className={`text-xl font-extrabold tracking-tight mt-0.5 ${
               c.hasBar ? riskColor(Number(c.value)) : "text-brand-dark"
             }`}
           >
