@@ -52,7 +52,7 @@ DEMO_ENGINEERS = [f"ENG-{i:03d}" for i in range(1, 16)]
 DEMO_TASK_TYPES = ["Repair", "Inspection", "Installation", "Replacement", "Emergency"]
 DEMO_STATUSES = ["Scheduled", "In Progress", "Pending Parts", "On Hold"]
 
-NUM_DEMO_ASSIGNMENTS = 60
+NUM_DEMO_ASSIGNMENTS = 200
 
 
 def _generate_demo_records() -> List[Dict[str, Any]]:
@@ -76,11 +76,8 @@ def _generate_demo_records() -> List[Dict[str, Any]]:
         records.append({
             "assignment_id": f"WO-{2024_0000 + i:08d}",
             "district": district,
-            "DISTRICT": district,
             "department": department,
-            "DEPARTMENT": department,
             "engineer_id": engineer,
-            "ASSIGNEDENGINEERS": engineer,
             "task_type": task_type,
             "status": status,
             "duration": round(duration, 2),
@@ -107,12 +104,13 @@ def _generate_demo_predictions(records: List[Dict[str, Any]]) -> np.ndarray:
 # ── Pydantic schemas ────────────────────────────────────────────────────────
 class ScheduleMetrics(BaseModel):
     overall_risk_score: float
-    expected_overdue_rate: float
     workload_imbalance_score: float
-    congestion_score: float
     total_assignments: int
     avg_predicted_hours: float
     median_predicted_hours: float
+    most_overloaded_engineer: str
+    highest_risk_district: str
+    highest_risk_department: str
 
 
 class AssignmentPrediction(BaseModel):
@@ -249,6 +247,8 @@ def _build_result_from_predictions(
     risk_scores = _compute_risk_scores(preds)
 
     assignment_preds = []
+    engineer_counts: Dict[str, int] = {}
+    district_counts: Dict[str, int] = {}
     for i, r in enumerate(records):
         aid = r.get("assignment_id", r.get("ASSIGNMENT_ID", f"A{i:04d}"))
         factors = []
@@ -256,10 +256,10 @@ def _build_result_from_predictions(
             factors.append("long predicted duration")
         if risk_scores[i] > 0.7:
             factors.append("high risk zone")
-        if r.get("district", r.get("DISTRICT")):
-            factors.append(f"district: {r.get('district', r.get('DISTRICT'))}")
-        if r.get("department", r.get("DEPARTMENT")):
-            factors.append(f"department: {r.get('department', r.get('DEPARTMENT'))}")
+        if r.get("district"):
+            factors.append(f"district: {r.get('district')}")
+        if r.get("department"):
+            factors.append(f"department: {r.get('department')}")
         if not factors:
             factors.append("normal workload")
 
@@ -270,31 +270,61 @@ def _build_result_from_predictions(
             "top_factors": factors[:3],
         })
 
-    engineer_counts: Dict[str, int] = {}
-    district_counts: Dict[str, int] = {}
-    for r in records:
-        eng = str(r.get("engineer_id", r.get("ASSIGNEDENGINEERS", "unknown")))
-        dist = str(r.get("district", r.get("DISTRICT", "unknown")))
-        engineer_counts[eng] = engineer_counts.get(eng, 0) + 1
-        district_counts[dist] = district_counts.get(dist, 0) + 1
+        if r.get("engineer_id"):
+            eng = r["engineer_id"]
+            engineer_counts[eng] = engineer_counts.get(eng, 0) + 1
+        
+        if r.get("district"):
+            dist = r["district"]
+            district_counts[dist] = district_counts.get(dist, 0) + 1
 
-    overdue_rate = float(np.mean(risk_scores > 0.5))
+    # Most overloaded engineer
+    if engineer_counts:
+        most_overloaded_engineer = max(engineer_counts.items(), key=lambda x: x[1])[0]
+    else:
+        most_overloaded_engineer = "N/A"
+
+    # Highest risk district
+    risk_by_district = _aggregate_by_key(
+        [{"district": r.get('district'), "risk": s}
+         for r, s in zip(records, risk_scores) if r.get("district")],
+        "district", "risk"
+    )
+    if risk_by_district:
+        highest_risk_district = max(risk_by_district, key=lambda x: x["avg_risk"])["name"]
+    else:
+        highest_risk_district = "N/A"
+
+    # Highest risk department
+    risk_by_department = _aggregate_by_key(
+        [{"department": r.get("department"), "risk": s}
+         for r, s in zip(records, risk_scores) if r.get("department")],
+        "department", "risk"
+    )
+    if risk_by_department:
+        highest_risk_department = max(risk_by_department, key=lambda x: x["avg_risk"])["name"]
+    else:
+        highest_risk_department = "N/A"
 
     schedule_metrics = {
         "overall_risk_score": round(float(np.mean(risk_scores)), 4),
-        "expected_overdue_rate": round(overdue_rate, 4),
         "workload_imbalance_score": round(_compute_workload_imbalance(engineer_counts), 4),
-        "congestion_score": round(_compute_congestion(district_counts), 4),
         "total_assignments": n,
         "avg_predicted_hours": round(float(np.mean(preds)), 2),
         "median_predicted_hours": round(float(np.median(preds)), 2),
+        "most_overloaded_engineer": most_overloaded_engineer,
+        "highest_risk_district": highest_risk_district,
+        "highest_risk_department": highest_risk_department,
     }
+
+    # Remove keys that are not in the schema
+    schedule_metrics = {k: v for k, v in schedule_metrics.items() if k in ScheduleMetrics.model_fields}
 
     charts = {
         "risk_histogram": _build_histogram(risk_scores, bins=10),
         "risk_by_district": _aggregate_by_key(
-            [{"district": r.get("district", r.get("DISTRICT", "unknown")), "risk": s}
-             for r, s in zip(records, risk_scores)],
+            [{"district": r.get("district"), "risk": s}
+             for r, s in zip(records, risk_scores) if r.get("district")],
             "district", "risk"
         ),
         "workload_by_engineer": [
@@ -302,8 +332,8 @@ def _build_result_from_predictions(
             for k, v in sorted(engineer_counts.items(), key=lambda x: -x[1])[:20]
         ],
         "risk_by_department": _aggregate_by_key(
-            [{"department": r.get("department", r.get("DEPARTMENT", "unknown")), "risk": s}
-             for r, s in zip(records, risk_scores)],
+            [{"department": r.get("department"), "risk": s}
+             for r, s in zip(records, risk_scores) if r.get("department")],
             "department", "risk"
         ),
     }
@@ -370,6 +400,72 @@ def _run_graph_inference(graph, records: List[Dict]) -> Dict:
 
     return _build_result_from_predictions(preds, records)
 
+def _build_complete_records_from_graph(graph) -> List[Dict]:
+    """
+    Generate complete assignment records using only the graph structure and relationships.
+    """
+    assignments = graph["assignments"]
+    node_ids = assignments.node_ids
+    records = []
+
+    # Build lookup maps for relationships
+    def build_edge_map(src_type, rel, dst_type):
+        edge_key = (src_type, rel, dst_type)
+        if edge_key in graph.edge_types:
+            edge_index = graph[edge_key].edge_index
+            return {int(src): int(dst) for src, dst in zip(edge_index[0], edge_index[1])}
+        return {}
+
+    # Assignment relationships
+    task_map = build_edge_map("assignments", "relates_to", "tasks")
+    engineer_map = build_edge_map("assignments", "relates_to", "engineers")
+
+    # Task relationships
+    status_map = build_edge_map("tasks", "relates_to", "task_statuses")
+    type_map = build_edge_map("tasks", "relates_to", "task_types")
+    district_map = build_edge_map("tasks", "relates_to", "districts")
+    department_map = build_edge_map("tasks", "relates_to", "departments")
+
+    # Helper to get attribute from node store
+    def get_attr(store, idx):
+        return store['node_ids'][idx]
+
+    for idx in range(assignments.num_nodes):
+        record = {
+            "assignment_id": str(node_ids[idx]),
+            "duration": float(assignments.y[idx]) if hasattr(assignments, "y") else None,
+        }
+
+        # Engineer info
+        eng_idx = engineer_map.get(idx)
+        if eng_idx is not None:
+            print()
+            record["engineer_id"] = get_attr(graph["engineers"], eng_idx)
+
+        # Task info
+        task_idx = task_map.get(idx)
+        if task_idx is not None:
+            record["task_id"] = str(task_idx)
+            # Task status
+            status_idx = status_map.get(task_idx)
+            if status_idx is not None:
+                record["status"] = get_attr(graph["task_statuses"], status_idx)
+            # Task type
+            type_idx = type_map.get(task_idx)
+            if type_idx is not None:
+                record["task_type"] = get_attr(graph["task_types"], type_idx)
+            # District
+            district_idx = district_map.get(task_idx)
+            if district_idx is not None:
+                record["district"] = get_attr(graph["districts"], district_idx)
+            # Department
+            department_idx = department_map.get(task_idx)
+            if department_idx is not None:
+                record["department"] = get_attr(graph["departments"], department_idx)
+
+        records.append(record)
+
+    return records
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -459,15 +555,16 @@ async def predict(
             )
 
         # Build graph
-        graph = build_graph_from_dir(staging_dir, config_path=config_path)
+        graph = build_graph_from_dir(staging_dir, config_path=config_path, save_path="data/graph/last_graph.pt")
+        records = _build_complete_records_from_graph(graph)
 
         # Extract assignment-level records from the graph
-        assign_node_ids = (
-            graph["assignments"].node_ids
-            if hasattr(graph["assignments"], "node_ids")
-            else list(range(graph["assignments"].num_nodes))
-        )
-        records = [{"assignment_id": str(aid)} for aid in assign_node_ids]
+        # assign_node_ids = (
+            # graph["assignments"].node_ids
+            # if hasattr(graph["assignments"], "node_ids")
+            # else list(range(graph["assignments"].num_nodes))
+        # )
+        # records = [{"assignment_id": str(aid)} for aid in assign_node_ids]
 
         # Run model inference on the freshly-built graph
         result = _run_graph_inference(graph, records)
