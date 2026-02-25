@@ -25,53 +25,67 @@ interface Edge {
 export default function GraphVisualizer({ predictions, graph }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
-  const [graphData, setGraphData] = useState<{
-    nodes: any[];
-    edges: any[];
-  } | null>(null);
+  // Use a ref to hold the currently-selected node to avoid triggering
+  // the main simulation effect (which would reset the view). Use a
+  // small state `selectedInfo` for the details panel only.
+  const selectedNodeRef = useRef<Node | null>(null);
+  const [selectedInfo, setSelectedInfo] = useState<{ id: string; group: string; risk?: number } | null>(
+    null
+  );
+  const nodesByIdRef = useRef<Map<string, Node> | null>(null);
+  const gRef = useRef<any>(null);
 
-  // Accept graph prop from parent (set after Run Analysis); otherwise fall back to fetching on mount
-  useEffect(() => {
-    if (graph) {
-      setGraphData({ nodes: graph.nodes || [], edges: graph.edges || [] });
-      return;
-    }
-    // If no graph prop provided, do nothing here — component will use demo fallback
-  }, [graph]);
-
-  // Normalize and construct nodes/edges for D3. If graphData is null, fall back to demo extraction from predictions.
+  // Normalize and construct nodes/edges for D3.
   const { nodes, edges } = useMemo(() => {
-    console.log(graphData)
-    if (graphData && graphData.nodes && graphData.edges) {
-      // Create a quick lookup for prediction risks
-      const riskMap = new Map<string, number>(predictions.map(p => [p.assignment_id, p.risk_score]));
+    if (graph && graph.nodes && graph.edges && graph.nodes.length > 0) {
+      const riskMap = new Map<string, number>(predictions.map((p) => [p.assignment_id, p.risk_score]));
 
-      const normalizedNodes: Node[] = graphData.nodes.map((n) => {
-        const id = n.id ?? n.node_id ?? n.name ?? String(n);
-        const type = n.type ?? n.group ?? n.node_type ?? n.nodeType ?? "unknown";
-        const label = n.label ?? n.name ?? id;
-        const node: Node = { id, group: String(type), label };
-        // If this looks like an assignment node, attach risk if available
-        if (riskMap.has(id)) node.risk = riskMap.get(id);
-        return node;
-      });
+      // Canonical mapping from backend plural types to singular group names used in demo
+      const TYPE_MAP: Record<string, string> = {
+        assignments: "assignment",
+        engineers: "engineer",
+        districts: "district",
+        departments: "department",
+      };
 
-      const normalizedEdges: Edge[] = graphData.edges.map((e) => {
-        // e may have source/target as objects or ids; coerce to ids
-        const s = e.source?.id ?? e.source?.node_id ?? e.source ?? e.src ?? e.u ?? null;
-        const t = e.target?.id ?? e.target?.node_id ?? e.target ?? e.dst ?? e.v ?? null;
-        return { source: String(s), target: String(t), type: e.type ?? e.rel ?? e.edge_type ?? "edge" } as Edge;
-      }).filter(e => e.source && e.target);
+      // Only include these canonical groups in the visualization
+      const ALLOWED = new Set(["assignment", "engineer", "district", "department", "task", "task_type", "task_statuses"]);
+      console.log ("Graph nodes:", graph.nodes, "edges:", graph.edges);
+      // Map backend nodes to canonical visualization nodes and filter by allowed types
+      const normalizedNodes: Node[] = graph.nodes
+        .map((n) => {
+          const id = String(n.id);
+          const rawType = String(n.type ?? n.node_type ?? n.group ?? "unknown");
+          const type = TYPE_MAP[rawType] ?? rawType.replace(/s$/i, "");
+          const label = String(n.label ?? n.name ?? id);
+          // Preserve layout positions from backend if present (helps spread)
+          const node: Node = { id, group: type, label, x: n.x ?? undefined, y: n.y ?? undefined } as Node;
+          if (riskMap.has(label)) node.risk = riskMap.get(label);
+          else if (riskMap.has(id)) node.risk = riskMap.get(id);
+          return node;
+        })
+        .filter((n) => ALLOWED.has(n.group));
 
-      // Ensure all edges refer to nodes that are present in normalizedNodes
+      // Build a set of node ids for fast filtering
       const nodeIdSet = new Set(normalizedNodes.map((n) => n.id));
-      const filteredEdges = normalizedEdges.filter((ee) => nodeIdSet.has(ee.source) && nodeIdSet.has(ee.target));
 
-      return { nodes: normalizedNodes, edges: filteredEdges };
+      // Normalize edges and filter out any that reference missing nodes
+      const normalizedEdges: Edge[] = (graph.edges || [])
+        .map((e) => ({
+          source: String(e.source),
+          target: String(e.target),
+          type: String(e.type ?? e.rel ?? e.edge_type ?? "edge"),
+        }))
+        .filter((ee) => nodeIdSet.has(ee.source) && nodeIdSet.has(ee.target));
+
+      // Remove nodes that have no edges (keep only nodes that appear as source/target)
+      const edgeNodeSet = new Set<string>(normalizedEdges.flatMap((e) => [e.source, e.target]));
+      const filteredNodes = normalizedNodes.filter((n) => edgeNodeSet.has(n.id));
+
+      return { nodes: filteredNodes, edges: normalizedEdges };
     }
 
-    // Fallback demo graph (original behavior)
+    // Demo fallback (unchanged)
     const engineerSet = new Set<string>();
     const districtSet = new Set<string>();
     const departmentSet = new Set<string>();
@@ -82,20 +96,14 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
     const edges: Edge[] = [];
 
     predictions.forEach((p) => {
-      assignmentNodes.push({
-        id: p.assignment_id,
-        group: "assignment",
-        risk: p.risk_score,
-        label: p.assignment_id,
-      });
-      // Demo: try to extract engineer, district, department from top_factors
+      assignmentNodes.push({ id: p.assignment_id, group: "assignment", risk: p.risk_score, label: p.assignment_id });
       let engineer = "";
       let district = "";
       let department = "";
-      p.top_factors.forEach(f => {
+      p.top_factors.forEach((f) => {
         if (f.startsWith("ENG-")) engineer = f;
-        else if (["North","South","East","West","Central","Downtown","Suburb-A","Suburb-B"].includes(f)) district = f;
-        else if (["Electrical","Plumbing","HVAC","Structural","General Maintenance","Landscaping"].includes(f)) department = f;
+        else if (["North", "South", "East", "West", "Central", "Downtown", "Suburb-A", "Suburb-B"].includes(f)) district = f;
+        else if (["Electrical", "Plumbing", "HVAC", "Structural", "General Maintenance", "Landscaping"].includes(f)) department = f;
       });
       if (engineer) engineerSet.add(engineer);
       if (district) districtSet.add(district);
@@ -104,12 +112,15 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
       if (district) edges.push({ source: p.assignment_id, target: district, type: "in_district" });
       if (department) edges.push({ source: p.assignment_id, target: department, type: "in_department" });
     });
-    engineerSet.forEach(e => engineerNodes.push({ id: e, group: "engineer", label: e }));
-    districtSet.forEach(d => districtNodes.push({ id: d, group: "district", label: d }));
-    departmentSet.forEach(dep => departmentNodes.push({ id: dep, group: "department", label: dep }));
-    const nodes = [...assignmentNodes, ...engineerNodes, ...districtNodes, ...departmentNodes];
-    return { nodes, edges };
-  }, [graphData, predictions]);
+    engineerSet.forEach((e) => engineerNodes.push({ id: e, group: "engineer", label: e }));
+    districtSet.forEach((d) => districtNodes.push({ id: d, group: "district", label: d }));
+    departmentSet.forEach((dep) => departmentNodes.push({ id: dep, group: "department", label: dep }));
+    const allNodes = [...assignmentNodes, ...engineerNodes, ...districtNodes, ...departmentNodes];
+    // Filter out nodes that do not participate in any edge
+    const edgeNodeSet = new Set<string>(edges.flatMap((e) => [e.source, e.target]));
+    const filteredDemoNodes = allNodes.filter((n) => edgeNodeSet.has(n.id));
+    return { nodes: filteredDemoNodes, edges };
+  }, [graph, predictions]);
 
   // Compute unique node types and assign colors (stable across renders)
   const uniqueTypes = useMemo(() => Array.from(new Set(nodes.map((n) => n.group))), [nodes]);
@@ -144,7 +155,8 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
       .attr("viewBox", [0, 0, width, height]);
     const g = svg.append("g");
 
-    // Zoom
+    // Zoom: ignore pointer events that originate on node circles so clicking
+    // a node does not change the zoom scale/transform.
     const zoom = d3
       .zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.1, 4])
@@ -154,71 +166,116 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
     // nodeColors and uniqueTypes are computed outside so legend and rendering share them
 
     // Edge rendering
-    const edgeLines = g
-      .append("g")
-      .selectAll("line")
-      .data(edges)
-      .join("line")
-      .attr("stroke", "#cbd5e1")
-      .attr("stroke-width", 1.2);
+    const edgeLines = g.append("g").selectAll("line").data(edges).join("line").attr("stroke", "#cbd5e1").attr("stroke-width", 1.2);
 
     // Node rendering
-    const circle = g
+      const circle = g
       .append("g")
       .selectAll("circle")
       .data(nodes)
       .join("circle")
-      .attr("r", (d) => d.group === "assignment" ? 6 : 8)
+      .attr("r", (d) => (d.group === "assignment" ? 8 : 12))
       .attr("fill", (d) => nodeColors[d.group] || "#64748b")
       .attr("stroke", "#fff")
       .attr("stroke-width", 1)
       .style("cursor", "pointer")
       .on("click", (event, d) => {
+        // Store selection in a ref and update a small details state so
+        // we do not re-run the main simulation effect (which depends on
+        // nodes/edges only). Avoid calling setSelectedNode which caused
+        // view resets.
         event.stopPropagation();
-        setSelectedNode(d);
+        selectedNodeRef.current = d as Node;
+        setSelectedInfo({ id: d.id, group: d.group, risk: d.risk });
       });
 
     // Tooltip
     circle.append("title").text((d) => `${d.label || d.id}${d.risk !== undefined ? `\nRisk: ${(d.risk * 100).toFixed(0)}%` : ''}`);
 
-    // Node labels (optional, for non-assignment nodes)
-    const labelText = g
-      .append("g")
-      .selectAll("text")
-      .data(nodes.filter(n => n.group !== "assignment"))
-      .join("text")
-      .attr("font-size", 10)
-      .attr("fill", "#334155")
-      .attr("text-anchor", "middle")
-      .text((d) => d.label || d.id);
+    // Create an empty label group; labels will be managed by a separate effect
+    g.append("g").attr("class", "labels");
 
     // D3 force simulation
-    const simulation = d3
-      .forceSimulation<Node>(nodes)
-      .force("charge", d3.forceManyBody().strength(-30))
-      .force("collide", d3.forceCollide().radius(10))
-      .force("link", d3.forceLink(edges).id((d: any) => d.id).distance(60).strength(0.7))
-      .force("x", d3.forceX(width / 2).strength(0.08))
-      .force("y", d3.forceY(height / 2).strength(0.08));
+    // Build a fast lookup map from id -> node object to avoid expensive array scans on each tick
+    const nodesById = new Map<string, Node>(nodes.map((n) => [n.id, n]));
+    nodesByIdRef.current = nodesById;
+    gRef.current = g;
+
+    const simulation = d3.forceSimulation<Node>(nodes);
+
+    // Stronger repulsion and larger link distances help the layout spread
+    simulation
+      .force("charge", d3.forceManyBody().strength(-90))
+      .force("collide", d3.forceCollide().radius((d: any) => (d.group === "assignment" ? 12 : 16)))
+      .force(
+        "link",
+        d3.forceLink(edges as any).id((d: any) => d.id).distance((d: any) => 100).strength(0.6)
+      )
+      // Use a single centering force rather than separate x/y pulls so nodes
+      // can spread naturally while remaining roughly within view.
+      .force("center", d3.forceCenter(width / 2, height / 2));
+
+    // Let the simulation breathe a bit longer for nicer spacing
+    simulation.alphaTarget(0.12).alphaDecay(0.03);
 
     simulation.on("tick", () => {
       edgeLines
-        .attr("x1", (d) => (nodes.find(n => n.id === d.source)?.x) || 0)
-        .attr("y1", (d) => (nodes.find(n => n.id === d.source)?.y) || 0)
-        .attr("x2", (d) => (nodes.find(n => n.id === d.target)?.x) || 0)
-        .attr("y2", (d) => (nodes.find(n => n.id === d.target)?.y) || 0);
-      circle
-        .attr("cx", (d) => d.x!)
-        .attr("cy", (d) => d.y!);
-      labelText
-        .attr("x", (d) => d.x!)
-        .attr("y", (d) => d.y! - 12);
+        .attr("x1", (d: any) => (typeof d.source === "object" ? d.source.x : nodesById.get(String(d.source))?.x) || 0)
+        .attr("y1", (d: any) => (typeof d.source === "object" ? d.source.y : nodesById.get(String(d.source))?.y) || 0)
+        .attr("x2", (d: any) => (typeof d.target === "object" ? d.target.x : nodesById.get(String(d.target))?.x) || 0)
+        .attr("y2", (d: any) => (typeof d.target === "object" ? d.target.y : nodesById.get(String(d.target))?.y) || 0)
+        .attr("stroke", "#cbd5e1")
+        .attr("stroke-width", 1.2);
+
+      circle.attr("cx", (d) => d.x!).attr("cy", (d) => d.y!);
+
+      // Update any visible label position
+      const labelSel = g.select("g.labels").selectAll("text");
+      // Position labels using the canonical node positions from nodesById
+      // (the bound datum for labels is a lightweight `selectedInfo` object,
+      // so we must look up the live node coordinates instead of relying on
+      // d.x/d.y from the datum).
+      if (selectedNodeRef.current) {
+        const live = nodesById.get(selectedNodeRef.current.id);
+        if (live) {
+          labelSel.attr("x", live.x!).attr("y", (live.y! - 14));
+        }
+      } else {
+        // no selection -> ensure no labels are visible/positioned
+        labelSel.attr("x", -9999).attr("y", -9999);
+      }
     });
 
     return () => {
       simulation.stop();
+      nodesByIdRef.current = null;
+      gRef.current = null;
     };
   }, [nodes, edges]);
+
+  // Update label text when selection changes without re-running the simulation
+  useEffect(() => {
+    const g = gRef.current;
+    if (!g) return;
+    const nodeMap = nodesByIdRef.current;
+
+    const labelSel = g.select("g.labels").selectAll("text").data(selectedInfo ? [selectedInfo] : []);
+    labelSel
+      .join(
+        (enter: any) =>
+          enter
+            .append("text")
+            .attr("font-size", 12)
+            .attr("fill", "#111827")
+            .attr("font-weight", 600)
+            .attr("text-anchor", "middle")
+            .text((d: any) => d.id),
+        (update: any) => update.text((d: any) => d.id),
+        (exit: any) => exit.remove()
+      )
+      .attr("x", (d: any) => nodeMap?.get(d.id)?.x ?? 0)
+      .attr("y", (d: any) => (nodeMap?.get(d.id)?.y ?? 0) - 14);
+  }, [selectedInfo]);
 
   return (
     <div className="flex flex-col md:flex-row gap-4 h-[400px]">
@@ -226,7 +283,7 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
         ref={wrapperRef}
         className="flex-1 bg-slate-50 border border-slate-100 rounded-lg overflow-hidden relative"
       >
-        <svg ref={svgRef} className="w-full h-full block" />
+        <svg ref={svgRef} className="w-full h-full block" onClick={() => setSelectedInfo(null)} />
           <div className="absolute top-2 left-2 bg-white/90 p-2 rounded border border-slate-100 shadow-sm">
             <div className="text-[10px] font-semibold text-slate-400 mb-1">Node Types</div>
             <div className="flex flex-col gap-1">
@@ -240,7 +297,7 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
           </div>
       </div>
 
-      {selectedNode && (
+      {selectedInfo && (
         <div className="w-full md:w-48 bg-white border border-slate-200 p-4 rounded-lg shadow-sm">
           <h3 className="text-xs font-bold text-slate-800 uppercase mb-2 border-b border-slate-100 pb-2">
             Details
@@ -248,25 +305,25 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
           <div className="space-y-2 text-xs">
             <div>
               <span className="block text-slate-400 font-semibold">Node ID</span>
-              <span className="font-mono text-slate-700">{selectedNode.id}</span>
+              <span className="font-mono text-slate-700">{selectedInfo.id}</span>
             </div>
             <div>
               <span className="block text-slate-400 font-semibold">Type</span>
-              <span className="font-mono text-slate-700">{selectedNode.group}</span>
+              <span className="font-mono text-slate-700">{selectedInfo.group}</span>
             </div>
-            {selectedNode.risk !== undefined && (
+            {selectedInfo.risk !== undefined && (
               <div>
                 <span className="block text-slate-400 font-semibold">Risk Score</span>
                 <span
                   className={`font-bold ${
-                    selectedNode.risk > 0.7
+                    selectedInfo.risk > 0.7
                       ? "text-red-500"
-                      : selectedNode.risk > 0.4
+                      : selectedInfo.risk > 0.4
                       ? "text-orange-400"
                       : "text-brand-green"
                   }`}
                 >
-                  {(selectedNode.risk * 100).toFixed(1)}%
+                  {(selectedInfo.risk * 100).toFixed(1)}%
                 </span>
               </div>
             )}
