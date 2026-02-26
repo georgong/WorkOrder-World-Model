@@ -125,7 +125,7 @@ export default function RiskTable({ predictions }: Props) {
           onClick={handleExport}
           className="px-3 py-1.5 text-sm font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition"
         >
-          📥 Export CSV
+          Export CSV
         </button>
       </div>
 
@@ -144,7 +144,7 @@ export default function RiskTable({ predictions }: Props) {
                 className="px-4 py-3 text-left font-medium text-gray-500 cursor-pointer hover:text-gray-700"
                 onClick={() => toggleSort("pred_completion_hours")}
               >
-                Pred. Hours {sortIcon("pred_completion_hours")}
+                Predicted Hours {sortIcon("pred_completion_hours")}
               </th>
               <th
                 className="px-4 py-3 text-left font-medium text-gray-500 cursor-pointer hover:text-gray-700"

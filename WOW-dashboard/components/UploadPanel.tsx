@@ -115,7 +115,7 @@ export default function UploadPanel({
       // max_nodes is expected as a query param by the backend
       let graph: GraphResponse | null = null;
       try {
-        const gr = await fetch(`/api/graph?max_nodes=300`, {
+        const gr = await fetch(`/api/graph?max_nodes=1000`, {
           method: "POST",
           body: form,
         });

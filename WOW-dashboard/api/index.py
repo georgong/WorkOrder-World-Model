@@ -620,71 +620,162 @@ async def predict(
             shutil.rmtree(staging_dir, ignore_errors=True)
 
 # ── Graph serialization for visualization ──────────────────────────────────
-def serialize_graph(graph, max_nodes=300):
+def serialize_graph(graph, max_nodes=500):
     """
     Serialize the constructed graph to a node/edge list for visualization.
-    If the graph is too large, sample a subgraph centered on assignments.
+
+    If the graph is too large, sample a subgraph while:
+      - keeping *all node types* represented (at least 1 node per type when available)
+      - sampling/keeping edges ONLY from the allowed edge relations below
     """
     import random
+    from typing import Any, Dict, List
+
+    # Only include/sample these edge relations (canonical edge types)
+    allowed_edge_types = {
+        ("tasks", "relates_to", "assignments"),
+        ("tasks", "relates_to", "task_statuses"),
+        ("tasks", "relates_to", "task_types"),
+        ("tasks", "relates_to", "districts"),
+        ("tasks", "relates_to", "departments"),
+        ("assignments", "relates_to", "tasks"),
+        ("assignments", "relates_to", "engineers"),
+        ("engineers", "relates_to", "assignments"),
+        ("engineers", "relates_to", "districts"),
+        ("engineers", "relates_to", "departments"),
+        ("districts", "relates_to", "tasks"),
+        ("districts", "relates_to", "engineers"),
+        ("departments", "relates_to", "tasks"),
+        ("departments", "relates_to", "engineers"),
+        ("task_statuses", "relates_to", "tasks"),
+        ("task_types", "relates_to", "tasks"),
+    }
+
     # Collect all nodes
     nodes = []
     node_id_map = {}  # (type, idx) -> global id
     node_types = list(graph.node_types)
     node_count = 0
+
     for ntype in node_types:
         ns = graph[ntype]
+        node_ids_attr = getattr(ns, "node_ids", None)
+        # Fall back to string indices if node_ids doesn't exist
+        if node_ids_attr is None:
+            node_ids_attr = [str(i) for i in range(ns.num_nodes)]
+
         for i in range(ns.num_nodes):
-            node_id = f"{ntype}:{getattr(ns, 'node_ids', [str(i)]*ns.num_nodes)[i]}"
-            node = {
-                "id": node_id,
-                "type": ntype,
-                "label": str(getattr(ns, 'node_ids', [str(i)]*ns.num_nodes)[i]),
-            }
+            nid = str(node_ids_attr[i])
+            node_id = f"{ntype}:{nid}"
+            node = {"id": node_id, "type": ntype, "label": nid}
             nodes.append(node)
             node_id_map[(ntype, i)] = node_id
             node_count += 1
 
-    # If too many nodes, sample a subgraph centered on assignments
-    if node_count > max_nodes and "assignments" in node_types:
-        # Sample a subset of assignments
-        assign_ns = graph["assignments"]
-        num_assign = assign_ns.num_nodes
-        sample_size = min(max_nodes // 3, num_assign)
-        sample_idxs = set(random.sample(range(num_assign), sample_size))
-        keep_nodes = set()
-        for idx in sample_idxs:
-            keep_nodes.add(node_id_map[("assignments", idx)])
-        # Add neighbors via edges
-        for etype in graph.edge_types:
-            ei = graph[etype].edge_index
-            src_type, _, dst_type = etype
-            for src, dst in zip(ei[0], ei[1]):
-                src_id = node_id_map.get((src_type, int(src)))
-                dst_id = node_id_map.get((dst_type, int(dst)))
-                if src_type == "assignments" and src_id in keep_nodes:
-                    keep_nodes.add(dst_id)
-                if dst_type == "assignments" and dst_id in keep_nodes:
-                    keep_nodes.add(src_id)
-        # Filter nodes
-        nodes = [n for n in nodes if n["id"] in keep_nodes]
-
-    # Collect all edges
-    edges = []
+    # Collect ONLY allowed edges
+    all_edges = []
     for etype in graph.edge_types:
+        if etype not in allowed_edge_types:
+            continue
+
         ei = graph[etype].edge_index
         src_type, rel, dst_type = etype
+
+        # edge_index is typically a torch tensor; iterate safely
         for src, dst in zip(ei[0], ei[1]):
             src_id = node_id_map.get((src_type, int(src)))
             dst_id = node_id_map.get((dst_type, int(dst)))
-            if src_id is not None and dst_id is not None:
-                edges.append({
+            if src_id is None or dst_id is None:
+                continue
+            all_edges.append(
+                {
                     "source": src_id,
                     "target": dst_id,
                     "type": rel,
                     "source_type": src_type,
                     "target_type": dst_type,
-                })
-    return {"nodes": nodes, "edges": edges, "node_types": node_types, "edge_types": [str(e) for e in graph.edge_types]}
+                }
+            )
+
+    # If node count exceeds max, sample a compact subgraph while ensuring:
+    #  - at least one node per node type (if available)
+    #  - edges included are ONLY from allowed relations (already enforced)
+    if node_count > max_nodes and len(all_edges) > 0:
+        print("node count", node_count, "exceeds max_nodes", max_nodes)
+        rnd = random.Random()
+
+        # Group nodes by their backend type
+        nodes_by_type: Dict[str, List[str]] = {}
+        for n in nodes:
+            nodes_by_type.setdefault(n["type"], []).append(n["id"])
+
+        # Group edges by *canonical* edge type (src_type, rel, dst_type)
+        edges_by_etype: Dict[tuple, List[Dict[str, Any]]] = {}
+        for e in all_edges:
+            key = (e["source_type"], e["type"], e["target_type"])
+            edges_by_etype.setdefault(key, []).append(e)
+
+        keep_nodes = set()
+        selected_edges: List[Dict[str, Any]] = []
+
+        # 1) Seed: ensure at least one node from every node type (if available)
+        for nt in node_types:
+            lst = nodes_by_type.get(nt)
+            if lst:
+                keep_nodes.add(rnd.choice(lst))
+
+        # 2) Seed: ensure at least one edge per *allowed canonical edge type* that exists
+        for et, elist in edges_by_etype.items():
+            if not elist:
+                continue
+            e = rnd.choice(elist)
+            keep_nodes.add(e["source"])
+            keep_nodes.add(e["target"])
+            selected_edges.append(e)
+
+        # If seeding already exceeded max_nodes, trim deterministically
+        if len(keep_nodes) > max_nodes:
+            keep_nodes = set(sorted(keep_nodes)[:max_nodes])
+
+        # 3) Greedily add random edges and their endpoints until we reach max_nodes
+        shuffled = all_edges[:]
+        rnd.shuffle(shuffled)
+        for e in shuffled:
+            if len(keep_nodes) >= max_nodes:
+                break
+
+            s, t = e["source"], e["target"]
+
+            if s in keep_nodes and t in keep_nodes:
+                selected_edges.append(e)
+                continue
+
+            missing = {s, t} - keep_nodes
+            if len(keep_nodes) + len(missing) <= max_nodes:
+                keep_nodes.update(missing)
+                selected_edges.append(e)
+
+        print("kept nodes:", len(keep_nodes))
+
+        # Final filter: nodes and edges restricted to keep_nodes
+        nodes = [n for n in nodes if n["id"] in keep_nodes]
+        edges = [
+            e
+            for e in selected_edges
+            if e["source"] in keep_nodes and e["target"] in keep_nodes
+        ]
+    else:
+        edges = all_edges
+
+    serialized_graph = {
+        "nodes": nodes,
+        "edges": edges,
+        "node_types": node_types,  # keep all node types available
+        # expose only the allowed edge types that actually exist in this graph
+        "edge_types": [str(e) for e in graph.edge_types if e in allowed_edge_types],
+    }
+    print(len(serialized_graph["nodes"]))
+    return serialized_graph
 
 # ── Graph API endpoint ─────────────────────────────────────────────────────
 @app.post("/api/graph")
@@ -697,7 +788,7 @@ async def get_graph(
     W6TASK_TYPES: UploadFile = File(...),
     W6TASKS: UploadFile = File(...),
     config_path: str = Query(DEFAULT_CONFIG_PATH, description="Path to graph YAML config"),
-    max_nodes: int = 300,
+    max_nodes: int = 500,
 ):
     """
     Returns the constructed graph (nodes and edges) for visualization.
