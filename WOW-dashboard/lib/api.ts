@@ -42,16 +42,3 @@ export async function predictFromGraphFiles(
   }
   return res.json();
 }
-
-export async function fetchGraph(max_nodes: number = 300): Promise<GraphResponse> {
-  const res = await fetch(`${API_BASE}/api/graph`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_nodes }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Graph request failed (${res.status}): ${body}`);
-  }
-  return res.json();
-}
