@@ -70,3 +70,4 @@ data explore/
 *.zip.spyproject
 pipeline_log.txt
 /wandb
+/WOW-dashboard/api/assets
