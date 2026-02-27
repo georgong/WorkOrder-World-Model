@@ -195,6 +195,10 @@ python -m src.runner.interpret_subgraph
 bash scripts/visualize_interpretation.sh
 ```
 
+## Model Application
+
+See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
+
 
 ## Project Structure
 
