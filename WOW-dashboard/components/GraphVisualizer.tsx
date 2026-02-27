@@ -7,6 +7,8 @@ import type { AssignmentPrediction, GraphResponse } from "@/lib/types";
 interface Props {
   predictions: AssignmentPrediction[];
   graph?: GraphResponse | null;
+  // Optional Tailwind height class applied to the outer container (e.g. "h-[400px]" or "h-[calc(100vh-200px)]")
+  heightClass?: string;
 }
 
 interface Node extends d3.SimulationNodeDatum {
@@ -22,7 +24,7 @@ interface Edge {
   type: string;
 }
 
-export default function GraphVisualizer({ predictions, graph }: Props) {
+export default function GraphVisualizer({ predictions, graph, heightClass = "h-[400px]" }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   // Use a ref to hold the currently-selected node to avoid triggering
@@ -34,6 +36,32 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
   );
   const nodesByIdRef = useRef<Map<string, Node> | null>(null);
   const gRef = useRef<any>(null);
+  // Fullscreen state for the graph container
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Request fullscreen for the wrapper element
+  const enterFullscreen = async () => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    try {
+      await (el as any).requestFullscreen();
+    } catch (e) {
+      // ignore failures
+    }
+  };
+
+  // Exit fullscreen if active
+  const exitFullscreen = async () => {
+    if (document.fullscreenElement) {
+      try {
+        await (document as any).exitFullscreen();
+      } catch (e) {
+        // ignore
+      }
+    }
+  };
+
+  // When in fullscreen, this controls whether the details panel is shown inside the fullscreen wrapper
+  const [showDetailsInFs, setShowDetailsInFs] = useState(false);
 
   // Normalize and construct nodes/edges for D3.
   const { nodes, edges } = useMemo(() => {
@@ -163,6 +191,13 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
       .on("zoom", (event) => g.attr("transform", event.transform));
     svg.call(zoom);
 
+    // Start with a slightly zoomed-out view so the graph appears smaller initially
+    try {
+      svg.call(zoom.transform as any, d3.zoomIdentity.scale(0.8));
+    } catch (e) {
+      // ignore if the runtime disallows immediate transform
+    }
+
     // nodeColors and uniqueTypes are computed outside so legend and rendering share them
 
     // Edge rendering
@@ -205,8 +240,10 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
 
     // Stronger repulsion and larger link distances help the layout spread
     simulation
-      .force("charge", d3.forceManyBody().strength(-90))
-      .force("collide", d3.forceCollide().radius((d: any) => (d.group === "assignment" ? 12 : 16)))
+      // Reduce repulsion so nodes sit more calmly
+      .force("charge", d3.forceManyBody().strength(-20))
+      // Smaller collision radius so nodes sit closer together
+      .force("collide", d3.forceCollide().radius((d: any) => (d.group === "assignment" ? 6 : 12)))
       .force(
         "link",
         d3.forceLink(edges as any).id((d: any) => d.id).distance((d: any) => 100).strength(0.6)
@@ -217,6 +254,33 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
 
     // Let the simulation breathe a bit longer for nicer spacing
     simulation.alphaTarget(0.12).alphaDecay(0.03);
+
+    // Add dragging so users can pull nodes; dragging temporarily fixes nodes (fx/fy)
+    const drag = d3
+      .drag<SVGCircleElement, Node>()
+      .on("start", (event: any, d: Node) => {
+        if (event.sourceEvent) event.sourceEvent.stopPropagation();
+        if (!event.active) simulation.alphaTarget(0.3).restart();
+        d.fx = d.x;
+        d.fy = d.y;
+      })
+      .on("drag", (event: any, d: Node) => {
+        d.fx = event.x;
+        d.fy = event.y;
+      })
+      .on("end", (event: any, d: Node) => {
+        if (!event.active) simulation.alphaTarget(0);
+        // release fixed position so the node may settle under simulation
+        d.fx = null as any;
+        d.fy = null as any;
+      });
+
+    // Attach drag behavior to node circles so users can pull nodes
+    try {
+      (circle as any).call(drag as any);
+    } catch (e) {
+      // if attaching drag fails, ignore quietly
+    }
 
     simulation.on("tick", () => {
       edgeLines
@@ -251,7 +315,32 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
       nodesByIdRef.current = null;
       gRef.current = null;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, isFullscreen]);
+
+  // Keep fullscreen state in sync with document; allow Esc to exit too
+  useEffect(() => {
+    const onFsChange = () => {
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      // when exiting fullscreen, hide the in-fullscreen details overlay
+      if (!fs) setShowDetailsInFs(false);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && document.fullscreenElement) {
+        try {
+          (document as any).exitFullscreen?.();
+        } catch (e) {
+          // ignore
+        }
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
 
   // Update label text when selection changes without re-running the simulation
   useEffect(() => {
@@ -278,7 +367,7 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
   }, [selectedInfo]);
 
   return (
-    <div className="flex flex-col md:flex-row gap-4 h-[400px]">
+    <div className={`flex flex-col md:flex-row gap-4 ${heightClass}`}>
       <div
         ref={wrapperRef}
         className="flex-1 bg-slate-50 border border-slate-100 rounded-lg overflow-hidden relative"
@@ -295,9 +384,73 @@ export default function GraphVisualizer({ predictions, graph }: Props) {
              ))}
             </div>
           </div>
+
+          {/* In fullscreen mode we render the details panel inside the fullscreen wrapper */}
+          {isFullscreen && showDetailsInFs && selectedInfo && (
+            <div className="absolute right-4 top-16 w-80 md:w-96 bg-white border border-slate-200 p-4 rounded-lg shadow-lg z-50">
+              <h3 className="text-sm font-bold text-slate-800 uppercase mb-2 border-b border-slate-100 pb-2">
+                Details
+              </h3>
+              <div className="space-y-2 text-sm">
+                <div>
+                  <span className="block text-slate-400 font-semibold">Node ID</span>
+                  <span className="font-mono text-slate-700">{selectedInfo.id}</span>
+                </div>
+                <div>
+                  <span className="block text-slate-400 font-semibold">Type</span>
+                  <span className="font-mono text-slate-700">{selectedInfo.group}</span>
+                </div>
+                {selectedInfo.risk !== undefined && (
+                  <div>
+                    <span className="block text-slate-400 font-semibold">Risk Score</span>
+                    <span
+                      className={`font-bold ${
+                        selectedInfo.risk > 0.7
+                          ? "text-red-500"
+                          : selectedInfo.risk > 0.4
+                          ? "text-orange-400"
+                          : "text-brand-green"
+                      }`}
+                    >
+                      {(selectedInfo.risk * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="absolute top-2 right-2 z-40">
+            {!isFullscreen ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // entering fullscreen should also show the details panel inside fullscreen
+                  setShowDetailsInFs(true);
+                  enterFullscreen();
+                }}
+                className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
+                aria-label="Enter fullscreen"
+              >
+                ⛶ Fullscreen
+              </button>
+            ) : (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowDetailsInFs(false);
+                  exitFullscreen();
+                }}
+                className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
+                aria-label="Exit fullscreen"
+              >
+                ✕ Exit
+              </button>
+            )}
+          </div>
       </div>
 
-      {selectedInfo && (
+      {selectedInfo && !(isFullscreen && showDetailsInFs) && (
         <div className="w-full md:w-48 bg-white border border-slate-200 p-4 rounded-lg shadow-sm">
           <h3 className="text-xs font-bold text-slate-800 uppercase mb-2 border-b border-slate-100 pb-2">
             Details

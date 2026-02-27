@@ -123,6 +123,8 @@ export default function Dashboard({ data, onReset }: Props) {
                 predictions={data.assignment_predictions}
                 // Pass through any graph found in metadata (set by UploadPanel)
                 graph={data.metadata?.graph}
+                // Make the graph take more vertical space on the Graph tab
+                heightClass="h-[calc(100vh-200px)]"
               />
             </div>
           </div>

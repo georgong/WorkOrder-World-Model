@@ -45,7 +45,7 @@ The Next.js dev server proxies `/api/*` requests to the FastAPI backend via the 
 
 ### Demo Mode
 
-If model assets (`api/assets/model.pt`, `api/assets/sdge.pt`) are not present, the backend falls back to **demo mode** with heuristic-based predictions. Click "🧪 Run Demo" in the UI to test.
+If model assets (`api/assets/model.pt`, `api/assets/sdge.pt`) are not present, the backend falls back to **demo mode** with heuristic-based predictions. Click "Run Demo" in the UI to test.
 
 ## API Endpoints
 
@@ -67,3 +67,12 @@ To run real GNN inference, place these files in `api/assets/`:
 - "feature_schemas/districts.json"
 - "feature_schemas/engineers.json"
 - "feature_schemas/tasks.json"
+
+## Files Setup
+
+Run this file to sample a subset of the CLICK dataset for testing
+`src/process/sample_subset.py`
+
+Run this file to generate feature schemas from feature engineering
+`src/process/save_training_schemas.py`
+
