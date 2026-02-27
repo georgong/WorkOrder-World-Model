@@ -60,6 +60,9 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
     }
   };
 
+  // When in fullscreen, this controls whether the details panel is shown inside the fullscreen wrapper
+  const [showDetailsInFs, setShowDetailsInFs] = useState(false);
+
   // Normalize and construct nodes/edges for D3.
   const { nodes, edges } = useMemo(() => {
     if (graph && graph.nodes && graph.edges && graph.nodes.length > 0) {
@@ -317,7 +320,10 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
   // Keep fullscreen state in sync with document; allow Esc to exit too
   useEffect(() => {
     const onFsChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      // when exiting fullscreen, hide the in-fullscreen details overlay
+      if (!fs) setShowDetailsInFs(false);
     };
     const onKey = (ev: KeyboardEvent) => {
       if (ev.key === "Escape" && document.fullscreenElement) {
@@ -379,11 +385,48 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
             </div>
           </div>
 
+          {/* In fullscreen mode we render the details panel inside the fullscreen wrapper */}
+          {isFullscreen && showDetailsInFs && selectedInfo && (
+            <div className="absolute right-4 top-16 w-80 md:w-96 bg-white border border-slate-200 p-4 rounded-lg shadow-lg z-50">
+              <h3 className="text-sm font-bold text-slate-800 uppercase mb-2 border-b border-slate-100 pb-2">
+                Details
+              </h3>
+              <div className="space-y-2 text-sm">
+                <div>
+                  <span className="block text-slate-400 font-semibold">Node ID</span>
+                  <span className="font-mono text-slate-700">{selectedInfo.id}</span>
+                </div>
+                <div>
+                  <span className="block text-slate-400 font-semibold">Type</span>
+                  <span className="font-mono text-slate-700">{selectedInfo.group}</span>
+                </div>
+                {selectedInfo.risk !== undefined && (
+                  <div>
+                    <span className="block text-slate-400 font-semibold">Risk Score</span>
+                    <span
+                      className={`font-bold ${
+                        selectedInfo.risk > 0.7
+                          ? "text-red-500"
+                          : selectedInfo.risk > 0.4
+                          ? "text-orange-400"
+                          : "text-brand-green"
+                      }`}
+                    >
+                      {(selectedInfo.risk * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="absolute top-2 right-2 z-40">
             {!isFullscreen ? (
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  // entering fullscreen should also show the details panel inside fullscreen
+                  setShowDetailsInFs(true);
                   enterFullscreen();
                 }}
                 className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
@@ -395,6 +438,7 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
               <button
                 onClick={(e) => {
                   e.stopPropagation();
+                  setShowDetailsInFs(false);
                   exitFullscreen();
                 }}
                 className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
@@ -406,7 +450,7 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
           </div>
       </div>
 
-      {selectedInfo && (
+      {selectedInfo && !(isFullscreen && showDetailsInFs) && (
         <div className="w-full md:w-48 bg-white border border-slate-200 p-4 rounded-lg shadow-sm">
           <h3 className="text-xs font-bold text-slate-800 uppercase mb-2 border-b border-slate-100 pb-2">
             Details
