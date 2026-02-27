@@ -36,6 +36,29 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
   );
   const nodesByIdRef = useRef<Map<string, Node> | null>(null);
   const gRef = useRef<any>(null);
+  // Fullscreen state for the graph container
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // Request fullscreen for the wrapper element
+  const enterFullscreen = async () => {
+    const el = wrapperRef.current;
+    if (!el) return;
+    try {
+      await (el as any).requestFullscreen();
+    } catch (e) {
+      // ignore failures
+    }
+  };
+
+  // Exit fullscreen if active
+  const exitFullscreen = async () => {
+    if (document.fullscreenElement) {
+      try {
+        await (document as any).exitFullscreen();
+      } catch (e) {
+        // ignore
+      }
+    }
+  };
 
   // Normalize and construct nodes/edges for D3.
   const { nodes, edges } = useMemo(() => {
@@ -289,7 +312,29 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
       nodesByIdRef.current = null;
       gRef.current = null;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, isFullscreen]);
+
+  // Keep fullscreen state in sync with document; allow Esc to exit too
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape" && document.fullscreenElement) {
+        try {
+          (document as any).exitFullscreen?.();
+        } catch (e) {
+          // ignore
+        }
+      }
+    };
+    document.addEventListener("fullscreenchange", onFsChange);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, []);
 
   // Update label text when selection changes without re-running the simulation
   useEffect(() => {
@@ -332,6 +377,32 @@ export default function GraphVisualizer({ predictions, graph, heightClass = "h-[
                </div>
              ))}
             </div>
+          </div>
+
+          <div className="absolute top-2 right-2 z-40">
+            {!isFullscreen ? (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  enterFullscreen();
+                }}
+                className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
+                aria-label="Enter fullscreen"
+              >
+                ⛶ Fullscreen
+              </button>
+            ) : (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  exitFullscreen();
+                }}
+                className="bg-white/90 p-2 rounded border border-slate-100 shadow-sm text-xs"
+                aria-label="Exit fullscreen"
+              >
+                ✕ Exit
+              </button>
+            )}
           </div>
       </div>
 
