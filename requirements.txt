@@ -4,6 +4,7 @@ numpy==1.26.4
 pandas==2.2.2
 polars==1.35.1
 uvicorn==0.37.0
+fastapi
 pyyaml
 pydantic
 pyarrow
@@ -12,3 +13,6 @@ pyarrow
 scikit-learn
 matplotlib
 plotly
+
+# Baselines (for src.runner.lightgbm_baseline)
+lightgbm

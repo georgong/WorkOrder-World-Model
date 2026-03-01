@@ -657,6 +657,9 @@ def run_one_fold(
             total_seeds += bs
             global_step += 1
 
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                break
+
             # tqdm postfix
             avg_loss = total_loss / max(total_seeds, 1)
             postfix = {"loss": f"{avg_loss:.5f}"}
@@ -696,7 +699,7 @@ def run_one_fold(
         # epoch-level eval
         val_metrics = eval_loader_smoothl1_mae_rmse(model, val_loader, target, device, beta=args.beta)
 
-        # log per epoch
+        # log per epoch (step=epoch so MLP and other baselines can align in W&B)
         wandb.log(
             {
                 "train/epoch_smoothl1": train_loss,
@@ -707,7 +710,7 @@ def run_one_fold(
                 "train/global_step": global_step,
                 "epoch": epoch,
             },
-            step=global_step,
+            step=epoch,
         )
 
         val_sl1 = float(val_metrics["smoothl1"])
@@ -730,6 +733,9 @@ def run_one_fold(
         if args.save_every > 0 and epoch % args.save_every == 0:
             save_checkpoint(save_dir, run_name, fold, epoch, model, opt, args)
 
+        if args.max_steps > 0 and global_step >= args.max_steps:
+            break
+
     wandb.log(
         {
             "summary/best_epoch": best_epoch,
@@ -737,7 +743,7 @@ def run_one_fold(
             "summary/best_val_rmse": best_val_rmse,
             "summary/baseline_val_smoothl1": baseline_val,
         },
-        step=global_step,
+        step=epoch,
     )
     wandb.finish()
 
@@ -788,6 +794,7 @@ def main():
 
     # train
     parser.add_argument("--epochs", type=int, default=2)
+    parser.add_argument("--max_steps", type=int, default=2800, help="Stop after this many steps (0 = no limit)")
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--wd", type=float, default=1e-4)
     parser.add_argument("--beta", type=float, default=1.0)

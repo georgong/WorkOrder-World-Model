@@ -1,12 +1,15 @@
-# pca_weights.py — Fast PCA of last hidden layer, grouped by engineer / task.
+# tsne_weights.py — t-SNE of last hidden layer, grouped by engineer / task.
+# Same pipeline as pca_weights but uses t-SNE instead of PCA.
 # Only samples assignments that have both engineer and task neighbors.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -183,11 +186,12 @@ def collect_last_hidden_and_labels(
     target: str,
     device: torch.device,
     max_samples: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Returns (hidden [N, D], engineer_labels [N], task_labels [N]) on CPU."""
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Returns (hidden [N, D], engineer_labels [N], task_labels [N], assignment_ids [N]) on CPU."""
     hidden_list: List[torch.Tensor] = []
     eng_list: List[torch.Tensor] = []
     task_list: List[torch.Tensor] = []
+    nid_list: List[torch.Tensor] = []
     n = 0
     for batch in tqdm(loader, desc="collect", leave=False):
         batch = batch.to(device)
@@ -197,16 +201,20 @@ def collect_last_hidden_and_labels(
             continue
         h_seed = h[:bs]
         eng, task = get_batch_labels(batch, target, bs)
+        # global node ids for the seed (assignment) nodes
+        a_nid = batch[target].n_id[:bs] if hasattr(batch[target], "n_id") else torch.arange(bs, device=batch[target].x.device)
         hidden_list.append(h_seed.cpu())
         eng_list.append(eng.cpu())
         task_list.append(task.cpu())
+        nid_list.append(a_nid.cpu())
         n += bs
         if n >= max_samples:
             break
     H = torch.cat(hidden_list, dim=0)[:max_samples]
     E = torch.cat(eng_list, dim=0)[:max_samples]
     T = torch.cat(task_list, dim=0)[:max_samples]
-    return H, E, T
+    A_ids = torch.cat(nid_list, dim=0)[:max_samples]
+    return H, E, T, A_ids
 
 
 # -------------------------
@@ -223,6 +231,43 @@ def build_neighbor_lookups(data: HeteroData) -> Dict[Tuple[str, str], Dict[int, 
         for j in range(ei.size(1)):
             a, b = int(ei[0, j].item()), int(ei[1, j].item())
             out[key][a] = b
+    return out
+
+
+def get_neighbors_with_features(
+    data: HeteroData,
+    target: str,
+    node_id: int,
+    attr_name_by_type: Optional[Dict[str, List[str]]] = None,
+) -> List[Dict[str, Any]]:
+    """For one assignment node_id, return list of neighbors with their x and attr_list (from .attr_name) corresponding to x."""
+    out: List[Dict[str, Any]] = []
+    for (src, _rel, dst) in data.edge_types:
+        ei = data[(src, _rel, dst)].edge_index
+        if src == target:
+            mask = ei[0] == node_id
+            neighbor_ids = ei[1, mask]
+            other_type = dst
+        elif dst == target:
+            mask = ei[1] == node_id
+            neighbor_ids = ei[0, mask]
+            other_type = src
+        else:
+            continue
+        for j in range(neighbor_ids.size(0)):
+            nid = int(neighbor_ids[j].item())
+            entry: Dict[str, Any] = {"node_type": other_type, "node_id": nid}
+            if hasattr(data[other_type], "x") and isinstance(data[other_type].x, torch.Tensor):
+                entry["x"] = [float(v) for v in data[other_type].x[nid].tolist()]
+            # attr_list for this node type, corresponding to x (use .attr_name from graph or saved lookup)
+            an = None
+            if hasattr(data[other_type], "attr_name"):
+                an = data[other_type].attr_name
+            if an is None and attr_name_by_type is not None:
+                an = attr_name_by_type.get(other_type)
+            if an is not None:
+                entry["attr_list"] = an if isinstance(an, list) else (an.tolist() if hasattr(an, "tolist") else list(an))
+            out.append(entry)
     return out
 
 
@@ -264,21 +309,44 @@ def enrich_labels_from_graph(
 
 
 # -------------------------
-# PyTorch PCA (SVD)
+# PCA + t-SNE (sklearn) — optional PCA to reduce memory before t-SNE
 # -------------------------
-def pca_torch(X: torch.Tensor, n_components: int = 2, device: Optional[torch.device] = None) -> Tuple[torch.Tensor, Dict[str, Any]]:
-    """X: [N, D]. Returns (coords [N, k], info)."""
-    if device is None:
-        device = X.device
-    X = X.to(device).float().nan_to_num(nan=0.0, posinf=0.0, neginf=0.0)
-    X = X - X.mean(dim=0)
-    U, S, _ = torch.linalg.svd(X, full_matrices=False)
-    k = min(n_components, S.size(0), U.size(1))
-    coords = (U[:, :k] * S[:k]).cpu()
-    var = S * S
-    total = var.sum().item()
-    explained = (var[:k] / total).tolist() if total > 0 else [0.0] * k
-    return coords, {"explained_variance_ratio": explained, "n_components": k}
+def tsne_fit(
+    X: torch.Tensor,
+    n_components: int = 2,
+    perplexity: float = 30.0,
+    max_iter: int = 1000,
+    random_state: Optional[int] = None,
+    n_jobs: Optional[int] = 1,
+    pca_dims: Optional[int] = None,
+    **kwargs: Any,
+) -> Tuple[torch.Tensor, Dict[str, Any]]:
+    """X: [N, D]. Returns (coords [N, n_components], info). Uses n_jobs=1 by default to avoid segfaults.
+    If pca_dims is set, reduce to that many components first to save memory."""
+    from sklearn.manifold import TSNE
+    from sklearn.decomposition import PCA
+    X_np = X.numpy().astype("float64")
+    X_np = np.nan_to_num(X_np, nan=0.0, posinf=0.0, neginf=0.0)
+    if pca_dims is not None and pca_dims > 0 and X_np.shape[1] > pca_dims:
+        pca = PCA(n_components=min(pca_dims, X_np.shape[0], X_np.shape[1]), random_state=random_state)
+        X_np = pca.fit_transform(X_np)
+    tsne = TSNE(
+        n_components=n_components,
+        perplexity=min(perplexity, max(1, X_np.shape[0] // 3)),
+        max_iter=max_iter,
+        random_state=random_state,
+        n_jobs=n_jobs,
+        **kwargs,
+    )
+    coords_np = tsne.fit_transform(X_np)
+    coords = torch.from_numpy(coords_np).float()
+    info = {
+        "n_components": n_components,
+        "perplexity": float(tsne.perplexity),
+        "max_iter": max_iter,
+        "pca_dims": pca_dims,
+    }
+    return coords, info
 
 
 # -------------------------
@@ -310,6 +378,8 @@ def save_scatter_png(
     out_path: Path,
     title: str,
     label_name: str,
+    xlabel: str = "t-SNE 1",
+    ylabel: str = "t-SNE 2",
 ) -> None:
     try:
         import matplotlib
@@ -320,12 +390,13 @@ def save_scatter_png(
     valid = labels >= 0
     if valid.sum() == 0:
         return
-    x, y = coords[valid, 0].numpy(), coords[valid, 1].numpy()
+    x = coords[valid, 0].numpy()
+    y = coords[valid, 1].numpy()
     c = labels[valid].numpy()
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.scatter(x, y, c=c, cmap="tab20", alpha=0.6, s=8)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(title)
     plt.colorbar(ax.collections[0], ax=ax, label=label_name)
     fig.tight_layout()
@@ -337,28 +408,41 @@ def save_scatter_png(
 # main
 # -------------------------
 def main():
-    ap = argparse.ArgumentParser(description="PCA of last hidden layer (assignments with engineer+task neighbors only).")
+    ap = argparse.ArgumentParser(description="t-SNE of last hidden layer (assignments with engineer+task neighbors only).")
     ap.add_argument("--pt", type=str, required=True, help="Graph .pt")
     ap.add_argument("--ckpt", type=str, required=True, help="Checkpoint .pt or dir")
     ap.add_argument("--target", type=str, default=None)
     ap.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     ap.add_argument("--max_samples", type=int, default=10000, help="Max samples to collect (faster).")
-    ap.add_argument("--batch_size", type=int, default=512)
+    ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--num_neighbors", type=int, default=5)
-    ap.add_argument("--out_dir", type=str, default="runs/pca_weights")
+    ap.add_argument("--out_dir", type=str, default="runs/tsne_weights")
     ap.add_argument("--device", type=str, default="auto")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--train_ratio", type=float, default=0.8)
     ap.add_argument("--val_ratio", type=float, default=0.1)
+    ap.add_argument("--perplexity", type=float, default=30.0, help="t-SNE perplexity.")
+    ap.add_argument("--max_iter", type=int, default=1000, help="t-SNE iterations (sklearn max_iter).")
+    ap.add_argument("--n_jobs", type=int, default=1, help="t-SNE n_jobs (default 1 to avoid segfaults).")
+    ap.add_argument("--tsne_subsample", type=int, default=2000, help="Max points to use for t-SNE (subsample if larger; 0 = use all). Reduces CPU memory.")
+    ap.add_argument("--pca_dims", type=int, default=10, help="PCA components before t-SNE (0 = no PCA). Reduces memory and time.")
     args = ap.parse_args()
 
     device = pick_device(args.device)
-    pt_path = Path(args.pt)
-    ckpt_path = Path(args.ckpt)
+    pt_path = Path(args.pt).resolve()
+    ckpt_path = Path(args.ckpt).resolve()
     if ckpt_path.is_dir():
         ckpts = sort_ckpts(list(ckpt_path.glob("*.pt")))
-        ckpt_path = ckpts[-1] if ckpts else ckpt_path
-    assert pt_path.exists() and ckpt_path.exists(), "Missing --pt or --ckpt"
+        ckpt_path = ckpts[-1].resolve() if ckpts else ckpt_path
+    elif not ckpt_path.exists() and ckpt_path.suffix == ".pt" and str(ckpt_path).endswith(".pt.pt"):
+        # try stripping duplicate .pt (e.g. ...epoch002.pt.pt -> ...epoch002.pt)
+        alt = ckpt_path.parent / ckpt_path.stem
+        if alt.exists():
+            ckpt_path = alt.resolve()
+    if not pt_path.exists():
+        raise FileNotFoundError(f"--pt path does not exist: {pt_path}")
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"--ckpt path does not exist: {ckpt_path}")
 
     payload = load_ckpt(ckpt_path)
     ckpt_args = payload["args"]
@@ -387,6 +471,11 @@ def main():
 
     normalize_node_features_inplace(data, drop_const=True)
     in_dims = ensure_all_node_types_have_x(data)
+    # Save .attr_name per node type before sanitize (sanitize removes non-tensor keys)
+    attr_name_by_type: Dict[str, List[str]] = {}
+    for nt in data.node_types:
+        if hasattr(data[nt], "attr_name") and isinstance(data[nt].attr_name, list):
+            attr_name_by_type[nt] = list(data[nt].attr_name)
     sanitize_for_neighbor_loader(data)
 
     num_neighbors = {et: [ckpt_args.get("num_neighbors", args.num_neighbors)] * layers for et in data.edge_types}
@@ -409,29 +498,50 @@ def main():
     model.eval()
 
     print(f"[info] collecting last hidden, max_samples={args.max_samples}")
-    H, E, T = collect_last_hidden_and_labels(model, loader, target, device, args.max_samples)
+    H, E, T, A_ids = collect_last_hidden_and_labels(model, loader, target, device, args.max_samples)
     n = H.size(0)
     print(f"[info] collected n={n}")
 
-    coords, pca_info = pca_torch(H, n_components=2, device=device)
+    # Subsample for t-SNE to reduce CPU memory (avoid OOM/segfault)
+    if args.tsne_subsample > 0 and n > args.tsne_subsample:
+        g = torch.Generator().manual_seed(args.seed)
+        perm = torch.randperm(n, generator=g)
+        keep = perm[: args.tsne_subsample]
+        H = H[keep]
+        E = E[keep]
+        T = T[keep]
+        A_ids = A_ids[keep]
+        n = H.size(0)
+        print(f"[info] subsampled to n={n} for t-SNE (--tsne_subsample)")
+
     # Enrich task_type, district, department from full graph (via task / engineer)
     task_type, district, department = enrich_labels_from_graph(data, E, T)
+
+    coords, tsne_info = tsne_fit(
+        H,
+        n_components=2,
+        perplexity=args.perplexity,
+        max_iter=args.max_iter,
+        random_state=args.seed,
+        n_jobs=args.n_jobs,
+        pca_dims=args.pca_dims if args.pca_dims > 0 else None,
+    )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    save_scatter_png(coords, E, out_dir / "pca_by_engineer.png", "Last hidden — by engineer", "engineer")
-    save_scatter_png(coords, T, out_dir / "pca_by_task.png", "Last hidden — by task", "task")
-    save_scatter_png(coords, task_type, out_dir / "pca_by_task_type.png", "Last hidden — by task type", "task_type")
-    save_scatter_png(coords, district, out_dir / "pca_by_district.png", "Last hidden — by district", "district")
-    save_scatter_png(coords, department, out_dir / "pca_by_department.png", "Last hidden — by department", "department")
+    save_scatter_png(coords, E, out_dir / "tsne_by_engineer.png", "Last hidden — by engineer", "engineer")
+    save_scatter_png(coords, T, out_dir / "tsne_by_task.png", "Last hidden — by task", "task")
+    save_scatter_png(coords, task_type, out_dir / "tsne_by_task_type.png", "Last hidden — by task type", "task_type")
+    save_scatter_png(coords, district, out_dir / "tsne_by_district.png", "Last hidden — by district", "district")
+    save_scatter_png(coords, department, out_dir / "tsne_by_department.png", "Last hidden — by department", "department")
 
     summary = {
         "ckpt": str(ckpt_path),
         "target": target,
         "split": args.split,
         "n_samples": n,
-        "explained_variance_ratio": pca_info["explained_variance_ratio"],
+        "tsne": tsne_info,
         "label_coverage": {
             "engineer": int((E >= 0).sum().item()),
             "task": int((T >= 0).sum().item()),
@@ -440,9 +550,46 @@ def main():
             "department": int((department >= 0).sum().item()),
         },
     }
-    import json
-    (out_dir / "pca_summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"[ok] -> {out_dir}")
+    (out_dir / "tsne_summary.json").write_text(json.dumps(summary, indent=2))
+
+    # Detailed JSON: each node's x, y, attr_list (from .attr_name) corresponding to x, attributes, neighbors, and id_map
+    target_attr_list = attr_name_by_type.get(target)
+    id_map: Dict[str, List[float]] = {}
+    nodes_list: List[Dict[str, Any]] = []
+    for i in range(n):
+        a_id = int(A_ids[i].item())
+        x, y = float(coords[i, 0].item()), float(coords[i, 1].item())
+        id_map[str(a_id)] = [x, y]
+        # Node feature vector and attr_list so that x[i] corresponds to attr_list[i]
+        node_x = data[target].x[a_id].tolist() if hasattr(data[target], "x") and isinstance(data[target].x, torch.Tensor) else None
+        attributes = {
+            "engineer_id": int(E[i].item()) if E[i] >= 0 else None,
+            "task_id": int(T[i].item()) if T[i] >= 0 else None,
+            "task_type_id": int(task_type[i].item()) if task_type[i] >= 0 else None,
+            "district_id": int(district[i].item()) if district[i] >= 0 else None,
+            "department_id": int(department[i].item()) if department[i] >= 0 else None,
+            "y": float(data[target].y[a_id].item()) if hasattr(data[target], "y") and isinstance(data[target].y, torch.Tensor) else None,
+        }
+        neighbors = get_neighbors_with_features(data, target, a_id, attr_name_by_type=attr_name_by_type)
+        node_entry: Dict[str, Any] = {
+            "id": a_id,
+            "x": x,
+            "y": y,
+            "attributes": attributes,
+            "neighbors": neighbors,
+        }
+        if target_attr_list is not None:
+            node_entry["attr_list"] = target_attr_list
+        if node_x is not None:
+            node_entry["x_features"] = [float(v) for v in node_x]
+        nodes_list.append(node_entry)
+    tsne_nodes = {
+        "target_node_type": target,
+        "id_map": id_map,
+        "nodes": nodes_list,
+    }
+    (out_dir / "tsne_nodes.json").write_text(json.dumps(tsne_nodes, indent=2))
+    print(f"[ok] -> {out_dir} (tsne_summary.json, tsne_nodes.json)")
 
 
 if __name__ == "__main__":

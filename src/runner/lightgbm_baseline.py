@@ -1,5 +1,6 @@
-# src/runner/mlp_baseline.py
-# MLP baseline aligned with train_kfold: same data_path, full_idx from finite y, normalization, k-fold, W&B keys.
+# src/runner/lightgbm_baseline.py
+# LightGBM baseline using the same tabular feature pipeline as mlp_baseline (1-hop neighbor aggregation).
+# Use for comparison with GNN and MLP in W&B (same metrics: metrics/val_rmse, metrics/val_mae, etc.).
 
 from __future__ import annotations
 
@@ -9,18 +10,22 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
 from tqdm import tqdm
 
 import wandb
 
+try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None
+
 
 # -------------------------
-# seeds (align train_kfold)
+# seeds + k-fold (align train_kfold / mlp_baseline)
 # -------------------------
 def _parse_int_range_token(tok: str) -> List[int]:
     tok = tok.strip()
@@ -80,68 +85,6 @@ def complement(all_idx: torch.Tensor, holdout: torch.Tensor) -> torch.Tensor:
 
 
 # -------------------------
-# utils
-# -------------------------
-def pick_device(s: str) -> torch.device:
-    s = s.lower()
-    if s == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(s)
-
-
-def compute_target_degree(data: HeteroData, target: str, degree_mode: str = "in") -> torch.Tensor:
-    N = data[target].num_nodes
-    deg = torch.zeros(N, dtype=torch.long)
-    for (src, rel, dst) in data.edge_types:
-        ei = data[(src, rel, dst)].edge_index
-        if degree_mode in ("in", "inout") and dst == target:
-            deg += torch.bincount(ei[1], minlength=N)
-        if degree_mode in ("out", "inout") and src == target:
-            deg += torch.bincount(ei[0], minlength=N)
-    return deg
-
-
-def split_indices(idx: torch.Tensor, seed: int, train_ratio: float, val_ratio: float):
-    g = torch.Generator().manual_seed(seed)
-    perm = idx[torch.randperm(idx.numel(), generator=g)]
-    n_train = int(idx.numel() * train_ratio)
-    n_val = int(idx.numel() * val_ratio)
-    train_idx = perm[:n_train]
-    val_idx = perm[n_train:n_train + n_val]
-    test_idx = perm[n_train + n_val:]
-    return train_idx, val_idx, test_idx
-
-
-def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
-    in_dims = {nt: data[nt].x.size(-1) for nt in data.node_types if hasattr(data[nt], "x")}
-    for nt in data.node_types:
-        if nt not in in_dims:
-            in_dims[nt] = 1
-            data[nt].x = torch.zeros((data[nt].num_nodes, 1), dtype=torch.float)
-    return in_dims
-
-
-def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
-    for nt in data.node_types:
-        store = data[nt]
-        for key in list(store.keys()):
-            if isinstance(store[key], torch.Tensor):
-                continue
-            del store[key]
-    for et in data.edge_types:
-        store = data[et]
-        for key in list(store.keys()):
-            if isinstance(store[key], torch.Tensor):
-                continue
-            del store[key]
-    return data
-
-
-# -------------------------
 # normalization (align train_kfold)
 # -------------------------
 @torch.no_grad()
@@ -180,18 +123,70 @@ def normalize_node_features_inplace(
     return stats
 
 
-@torch.no_grad()
-def batch_stats_1d(v: torch.Tensor) -> Dict[str, float]:
-    v = v.detach()
-    if v.numel() <= 1:
-        m = v.mean().item() if v.numel() else float("nan")
-        return {"mean": m, "var": 0.0, "std": 0.0}
-    var = v.var(unbiased=False).item()
-    return {"mean": v.mean().item(), "var": var, "std": (var ** 0.5)}
+# -------------------------
+# utils (same as mlp_baseline)
+# -------------------------
+def pick_device(s: str) -> torch.device:
+    s = s.lower()
+    if s == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(s)
+
+
+def compute_target_degree(data: HeteroData, target: str, degree_mode: str = "in") -> torch.Tensor:
+    N = data[target].num_nodes
+    deg = torch.zeros(N, dtype=torch.long)
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if degree_mode in ("in", "inout") and dst == target:
+            deg += torch.bincount(ei[1], minlength=N)
+        if degree_mode in ("out", "inout") and src == target:
+            deg += torch.bincount(ei[0], minlength=N)
+    return deg
+
+
+def split_indices(idx: torch.Tensor, seed: int, train_ratio: float, val_ratio: float):
+    g = torch.Generator().manual_seed(seed)
+    perm = idx[torch.randperm(idx.numel(), generator=g)]
+    n_train = int(idx.numel() * train_ratio)
+    n_val = int(idx.numel() * val_ratio)
+    train_idx = perm[:n_train]
+    val_idx = perm[n_train : n_train + n_val]
+    test_idx = perm[n_train + n_val :]
+    return train_idx, val_idx, test_idx
+
+
+def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
+    in_dims = {nt: data[nt].x.size(-1) for nt in data.node_types if hasattr(data[nt], "x")}
+    for nt in data.node_types:
+        if nt not in in_dims:
+            in_dims[nt] = 1
+            data[nt].x = torch.zeros((data[nt].num_nodes, 1), dtype=torch.float)
+    return in_dims
+
+
+def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
+    for nt in data.node_types:
+        store = data[nt]
+        for key in list(store.keys()):
+            if isinstance(store[key], torch.Tensor):
+                continue
+            del store[key]
+    for et in data.edge_types:
+        store = data[et]
+        for key in list(store.keys()):
+            if isinstance(store[key], torch.Tensor):
+                continue
+            del store[key]
+    return data
 
 
 # -------------------------
-# per-seed neighbor aggregation (1-hop)
+# per-seed neighbor aggregation (same as mlp_baseline)
 # -------------------------
 def _find_edge_types_between(batch: HeteroData, src_nt: str, dst_nt: str) -> List[Tuple[str, str, str]]:
     out = []
@@ -209,10 +204,6 @@ def _agg_1hop_from_seed_to_type(
     neigh_nt: str,
     in_dim_neigh: int,
 ) -> torch.Tensor:
-    """
-    Returns per-seed aggregated features for neigh_nt.
-    Aggregation: mean, sum, max, count  => [bs, 3F+1]
-    """
     device = batch[seed_nt].x.device
     bs = int(seed_bs)
     Fdim = int(in_dim_neigh)
@@ -220,36 +211,28 @@ def _agg_1hop_from_seed_to_type(
     if neigh_nt not in batch.node_types or not hasattr(batch[neigh_nt], "x"):
         return torch.zeros((bs, 3 * Fdim + 1), device=device)
 
-    x_neigh = batch[neigh_nt].x  # [Nn, F]
+    x_neigh = batch[neigh_nt].x
     if x_neigh.dim() != 2 or x_neigh.size(1) != Fdim:
         return torch.zeros((bs, 3 * Fdim + 1), device=device)
 
     neigh_lists: List[List[int]] = [[] for _ in range(bs)]
 
-    # seed -> neigh
     for et in _find_edge_types_between(batch, seed_nt, neigh_nt):
         ei = batch[et].edge_index
         if ei.numel() == 0:
             continue
-        src = ei[0]
-        dst = ei[1]
+        src, dst = ei[0], ei[1]
         mask = src < bs
-        src = src[mask]
-        dst = dst[mask]
-        for s, d in zip(src.tolist(), dst.tolist()):
+        for s, d in zip(src[mask].tolist(), dst[mask].tolist()):
             neigh_lists[int(s)].append(int(d))
 
-    # neigh -> seed
     for et in _find_edge_types_between(batch, neigh_nt, seed_nt):
         ei = batch[et].edge_index
         if ei.numel() == 0:
             continue
-        src = ei[0]
-        dst = ei[1]
+        src, dst = ei[0], ei[1]
         mask = dst < bs
-        src = src[mask]
-        dst = dst[mask]
-        for n, s in zip(src.tolist(), dst.tolist()):
+        for n, s in zip(src[mask].tolist(), dst[mask].tolist()):
             neigh_lists[int(s)].append(int(n))
 
     out = torch.zeros((bs, 3 * Fdim + 1), device=device)
@@ -258,13 +241,12 @@ def _agg_1hop_from_seed_to_type(
         if not idx:
             continue
         idx_t = torch.tensor(idx, device=device, dtype=torch.long)
-        xn = x_neigh.index_select(0, idx_t)  # [K, F]
+        xn = x_neigh.index_select(0, idx_t)
         mean = xn.mean(dim=0)
         summ = xn.sum(dim=0)
         mx = xn.max(dim=0).values
         cnt = torch.tensor([float(xn.size(0))], device=device)
         out[i] = torch.cat([mean, summ, mx, cnt], dim=0)
-
     return out
 
 
@@ -278,7 +260,6 @@ def batch_to_tabular_per_seed(
     bs = int(batch[target].batch_size)
     y = batch[target].y[:bs].float()
     feats = [batch[target].x[:bs]]
-
     for nt in neighbor_types:
         feats.append(
             _agg_1hop_from_seed_to_type(
@@ -289,99 +270,54 @@ def batch_to_tabular_per_seed(
                 in_dim_neigh=in_dims.get(nt, 1),
             )
         )
-
     X = torch.cat(feats, dim=1)
     return X, y
 
 
-# -------------------------
-# MLP model
-# -------------------------
-class MLPRegressor(nn.Module):
-    def __init__(self, d_in: int, hidden: int = 256, depth: int = 3, dropout: float = 0.1):
-        super().__init__()
-        layers: List[nn.Module] = []
-        d = d_in
-        for _ in range(depth):
-            layers.append(nn.Linear(d, hidden))
-            layers.append(nn.ReLU())
-            layers.append(nn.Linear(hidden, hidden))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout))
-            d = hidden 
-        layers.append(nn.Linear(hidden, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
-
-
-# -------------------------
-# metrics: match GNN
-# -------------------------
-@torch.no_grad()
-def eval_loader_smoothl1_mae_rmse(
-    model: nn.Module,
+def collect_tabular_from_loader(
     loader: NeighborLoader,
     *,
     target: str,
     neighbor_types: List[str],
     in_dims: Dict[str, int],
     device: torch.device,
-    beta: float = 1.0,
-) -> Dict[str, float]:
-    model.eval()
-    se_sum = 0.0
-    ae_sum = 0.0
-    sl1_sum = 0.0
-    n = 0
-
-    for batch in tqdm(loader, desc="eval", leave=False):
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Collect (X, y) from loader into numpy arrays for LightGBM."""
+    X_list: List[torch.Tensor] = []
+    y_list: List[torch.Tensor] = []
+    for batch in tqdm(loader, desc="collect", leave=False):
         batch = batch.to(device)
-        X, y = batch_to_tabular_per_seed(batch, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
-        pred = model(X)
+        X, y = batch_to_tabular_per_seed(
+            batch, target=target, neighbor_types=neighbor_types, in_dims=in_dims
+        )
+        X_list.append(X.cpu())
+        y_list.append(y.cpu())
+    X_np = torch.cat(X_list, dim=0).numpy()
+    y_np = torch.cat(y_list, dim=0).numpy()
+    return X_np, y_np
 
-        se_sum += F.mse_loss(pred, y, reduction="sum").item()
-        ae_sum += F.l1_loss(pred, y, reduction="sum").item()
-        sl1_sum += F.smooth_l1_loss(pred, y, beta=beta, reduction="sum").item()
-        n += int(y.numel())
 
+# -------------------------
+# metrics (match GNN / MLP)
+# -------------------------
+def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, beta: float = 1.0) -> Dict[str, float]:
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
+    n = yt.size
     if n == 0:
         return {"mse": float("nan"), "mae": float("nan"), "rmse": float("nan"), "smoothl1": float("nan")}
-
-    mse = se_sum / n
-    mae = ae_sum / n
+    mse = float(np.mean((yp - yt) ** 2))
+    mae = float(np.mean(np.abs(yp - yt)))
     rmse = mse ** 0.5
-    smoothl1 = sl1_sum / n
+    diff = np.abs(yp - yt)
+    smoothl1 = float(np.mean(np.where(diff < beta, 0.5 * diff ** 2 / beta, diff - 0.5 * beta)))
     return {"mse": mse, "mae": mae, "rmse": rmse, "smoothl1": smoothl1}
 
 
-@torch.no_grad()
-def baseline_smoothl1_on_loader(
-    loader: NeighborLoader,
-    *,
-    target: str,
-    device: torch.device,
-    c: float,
-    beta: float = 1.0,
-) -> float:
-    total = 0.0
-    n = 0
-    for batch in tqdm(loader, desc="baseline", leave=False):
-        batch = batch.to(device)
-        bs = int(batch[target].batch_size)
-        y = batch[target].y[:bs].float()
-        pred = torch.full_like(y, float(c))
-        loss = F.smooth_l1_loss(pred, y, beta=beta, reduction="sum").item()
-        total += loss
-        n += bs
-    return total / max(n, 1)
-
-
 # -------------------------
-# one-fold training (align train_kfold.run_one_fold)
+# one-fold training (align train_kfold / mlp_baseline)
 # -------------------------
-def run_one_fold_mlp(
+def run_one_fold_lightgbm(
     *,
     base_data: HeteroData,
     target: str,
@@ -392,169 +328,121 @@ def run_one_fold_mlp(
     fold: int,
     group_name: str,
     neighbor_types: List[str],
+    in_dims: Dict[str, int],
+    num_neighbors: Dict[Tuple[str, str, str], List[int]],
     use_wandb: bool = True,
 ) -> Dict[str, Any]:
-    data = base_data.clone()
-    data[target].y = data[target].y.float()
-
-    normalize_node_features_inplace(data, drop_const=True)
-    in_dims = ensure_all_node_types_have_x(data)
-    data = sanitize_for_neighbor_loader(data)
-
-    num_neighbors = {et: [args.num_neighbors] * args.layers for et in data.edge_types}
     train_loader = NeighborLoader(
-        data,
+        base_data,
         input_nodes=(target, train_idx),
         num_neighbors=num_neighbors,
         batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        persistent_workers=(args.num_workers > 0),
+        shuffle=False,
     )
     val_loader = NeighborLoader(
-        data,
+        base_data,
         input_nodes=(target, val_idx),
         num_neighbors=num_neighbors,
         batch_size=args.eval_batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
-        persistent_workers=(args.num_workers > 0),
     )
 
-    probe_n = min(1000, int(train_idx.numel()))
-    probe_bs = min(1024, int(args.batch_size))
-    first = next(iter(NeighborLoader(
-        data, input_nodes=(target, train_idx[:probe_n]),
-        num_neighbors=num_neighbors, batch_size=probe_bs, shuffle=False,
-    ))).to(device)
-    X0, _ = batch_to_tabular_per_seed(first, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
-    d_in = int(X0.size(1))
+    t_start = time.time()
+    X_train, y_train = collect_tabular_from_loader(
+        train_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device
+    )
+    X_val, y_val = collect_tabular_from_loader(
+        val_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device
+    )
+    d_in = X_train.shape[1]
 
-    model = MLPRegressor(
-        d_in=d_in,
-        hidden=args.mlp_hidden,
-        depth=args.mlp_depth,
-        dropout=args.dropout,
-    ).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-
-    def loss_fn(pred: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        if args.loss == "smoothl1":
-            return F.smooth_l1_loss(pred, y, beta=args.beta)
-        if args.loss == "mse":
-            return F.mse_loss(pred, y)
-        return F.l1_loss(pred, y)
-
-    c_med = data[target].y[train_idx].median().item()
-    baseline_val = baseline_smoothl1_on_loader(val_loader, target=target, device=device, c=c_med, beta=args.beta)
+    c_med = float(np.median(y_train))
+    diff = np.abs(y_val - c_med)
+    baseline_val = float(np.mean(np.where(diff < args.beta, 0.5 * diff ** 2 / args.beta, diff - 0.5 * args.beta)))
 
     if use_wandb:
         wandb.init(
             project=args.wandb_project,
-            name=f"{args.wandb_run_name or 'kfold'}-mlp-fold{fold:02d}",
+            name=f"{args.wandb_run_name or 'kfold'}-lightgbm-fold{fold:02d}",
             group=group_name,
             config={
                 **vars(args),
                 "fold": fold,
-                "fold_train_n": int(train_idx.numel()),
-                "fold_val_n": int(val_idx.numel()),
+                "fold_train_n": int(X_train.shape[0]),
+                "fold_val_n": int(X_val.shape[0]),
                 "d_in": d_in,
-                "model_type": "mlp",
+                "model_type": "lightgbm",
             },
             reinit=True,
         )
         wandb.log({"baseline/median_c": c_med, "baseline/val_smoothl1": baseline_val}, step=0)
 
-    global_step = 0
-    best_val_sl1 = float("inf")
-    best_val_rmse = float("inf")
-    best_epoch = -1
+    num_boost_round = min(args.n_estimators, args.max_rounds) if args.max_rounds > 0 else args.n_estimators
+    train_data = lgb.Dataset(X_train, label=y_train)
+    val_data = lgb.Dataset(X_val, label=y_val, reference=train_data)
 
-    for epoch in range(1, args.epochs + 1):
-        model.train()
-        total_loss = 0.0
-        total_seeds = 0
-        pbar = tqdm(train_loader, desc=f"Fold {fold:02d} Epoch {epoch:03d} [mlp/train]")
-        for batch in pbar:
-            batch = batch.to(device)
-            X, y = batch_to_tabular_per_seed(batch, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
-            pred = model(X)
-            loss = loss_fn(pred, y)
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            opt.step()
-            bs = int(y.numel())
-            total_loss += loss.item() * bs
-            total_seeds += bs
-            global_step += 1
-            pbar.set_postfix(loss=f"{total_loss / max(total_seeds, 1):.5f}")
+    model = lgb.train(
+        {
+            "objective": args.objective,
+            "metric": "rmse",
+            "num_leaves": args.num_leaves,
+            "max_depth": args.max_depth,
+            "learning_rate": args.learning_rate,
+            "min_child_samples": args.min_child_samples,
+            "reg_alpha": args.reg_alpha,
+            "reg_lambda": args.reg_lambda,
+            "verbosity": -1,
+            "seed": args.seed,
+        },
+        train_data,
+        num_boost_round=num_boost_round,
+        valid_sets=[val_data],
+        valid_names=["val"],
+        callbacks=[
+            lgb.early_stopping(args.early_stopping_rounds, verbose=True),
+            lgb.log_evaluation(period=100),
+        ],
+    )
 
-            if args.max_steps > 0 and global_step >= args.max_steps:
-                break
+    train_time = time.time() - t_start
+    y_val_pred = model.predict(X_val)
+    va = compute_metrics(y_val, y_val_pred, beta=args.beta)
+    best_val_sl1 = float(va["smoothl1"])
+    best_val_rmse = float(va["rmse"])
 
-            if use_wandb and args.wandb_log_every > 0 and (global_step % args.wandb_log_every == 0):
-                wandb.log(
-                    {
-                        "train/step_smoothl1": float(loss.item()),
-                        "train/step_avg_smoothl1": total_loss / max(total_seeds, 1),
-                        "train/global_step": global_step,
-                        "train/epoch": epoch,
-                    },
-                    step=global_step,
-                )
-
-        train_loss = total_loss / max(total_seeds, 1)
-        val_metrics = eval_loader_smoothl1_mae_rmse(
-            model, val_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device, beta=args.beta
-        )
-
-        if use_wandb:
-            wandb.log(
-                {
-                    "train/epoch_smoothl1": train_loss,
-                    "val/mse": val_metrics["mse"],
-                    "val/mae": val_metrics["mae"],
-                    "val/rmse": val_metrics["rmse"],
-                    "val/smoothl1": val_metrics["smoothl1"],
-                    "train/global_step": global_step,
-                    "epoch": epoch,
-                },
-                step=epoch,
-            )
-
-        val_sl1 = float(val_metrics["smoothl1"])
-        val_rmse = float(val_metrics["rmse"])
-        print(f"[fold {fold:02d}][mlp][epoch {epoch:03d}] train_smoothl1={train_loss:.6f}  val_smoothl1={val_sl1:.6f}  val_rmse={val_rmse:.6f}")
-
-        if val_sl1 < best_val_sl1:
-            best_val_sl1 = val_sl1
-            best_val_rmse = min(best_val_rmse, val_rmse)
-            best_epoch = epoch
-
-        if device.type == "mps":
-            torch.mps.empty_cache()
-
-        if args.max_steps > 0 and global_step >= args.max_steps:
-            break
+    print(
+        f"[fold {fold:02d}][lightgbm] val_smoothl1={best_val_sl1:.6f}  val_rmse={best_val_rmse:.6f}  "
+        f"(base {baseline_val:.6f})  time_s={train_time:.1f}"
+    )
 
     if use_wandb:
         wandb.log(
             {
-                "summary/best_epoch": best_epoch,
+                "train/epoch_smoothl1": float(np.mean(np.abs(model.predict(X_train) - y_train))),
+                "val/mse": va["mse"],
+                "val/mae": va["mae"],
+                "val/rmse": va["rmse"],
+                "val/smoothl1": va["smoothl1"],
+                "epoch": 1,
+                "time/elapsed_s": train_time,
+            },
+            step=1,
+        )
+        wandb.log(
+            {
+                "summary/best_epoch": 1,
                 "summary/best_val_smoothl1": best_val_sl1,
                 "summary/best_val_rmse": best_val_rmse,
                 "summary/baseline_val_smoothl1": baseline_val,
             },
-            step=epoch,
+            step=1,
         )
         wandb.finish()
 
     return {
         "fold": fold,
-        "model": "mlp",
-        "best_epoch": best_epoch,
+        "model": "lightgbm",
+        "best_epoch": 1,
         "best_val_smoothl1": best_val_sl1,
         "best_val_rmse": best_val_rmse,
         "baseline_val_smoothl1": baseline_val,
@@ -565,47 +453,41 @@ def run_one_fold_mlp(
 # main
 # -------------------------
 def main():
-    ap = argparse.ArgumentParser(description="MLP baseline aligned with train_kfold (k-fold, normalization, W&B).")
-    # data (align train_kfold)
-    ap.add_argument("--data_path", type=str, default=None, help="Path to HeteroData .pt (same as train_kfold)")
-    ap.add_argument("--pt", type=str, default=None, help="Alias for --data_path")
+    if lgb is None:
+        raise SystemExit("lightgbm is not installed. pip install lightgbm")
+
+    ap = argparse.ArgumentParser(description="LightGBM baseline aligned with train_kfold (k-fold, W&B, max_rounds).")
+    ap.add_argument("--data_path", type=str, default=None)
+    ap.add_argument("--pt", type=str, default=None)
     ap.add_argument("--target", type=str, default="assignments")
     ap.add_argument("--label_key", type=str, default="y")
 
-    # k-fold
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--seeds", type=str, default=None)
     ap.add_argument("--seeds_file", type=str, default=None)
 
-    # loader (align train_kfold defaults)
+    ap.add_argument("--device", type=str, default="auto")
+    ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--num_neighbors", type=int, default=5)
     ap.add_argument("--batch_size", type=int, default=2048)
     ap.add_argument("--eval_batch_size", type=int, default=2048)
-    ap.add_argument("--num_neighbors", type=int, default=5)
-    ap.add_argument("--layers", type=int, default=2)
-    ap.add_argument("--num_workers", type=int, default=0)
 
-    # MLP hyperparams
-    ap.add_argument("--mlp_hidden", type=int, default=256)
-    ap.add_argument("--mlp_depth", type=int, default=3)
-    ap.add_argument("--dropout", type=float, default=0.1)
-
-    # optim
-    ap.add_argument("--epochs", type=int, default=2)
-    ap.add_argument("--max_steps", type=int, default=2800, help="Stop after this many steps (0 = no limit)")
-    ap.add_argument("--lr", type=float, default=2e-3)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--loss", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
+    ap.add_argument("--num_leaves", type=int, default=31)
+    ap.add_argument("--max_depth", type=int, default=-1)
+    ap.add_argument("--learning_rate", type=float, default=0.1)
+    ap.add_argument("--n_estimators", type=int, default=500)
+    ap.add_argument("--max_rounds", type=int, default=2800, help="Cap num_boost_round (0 = use n_estimators only)")
+    ap.add_argument("--min_child_samples", type=int, default=20)
+    ap.add_argument("--reg_alpha", type=float, default=0.0)
+    ap.add_argument("--reg_lambda", type=float, default=0.0)
+    ap.add_argument("--early_stopping_rounds", type=int, default=50)
+    ap.add_argument("--objective", type=str, default="regression", choices=["regression", "regression_l1"])
     ap.add_argument("--beta", type=float, default=1.0)
-    ap.add_argument("--grad_clip", type=float, default=0.0)
 
-    # wandb (align train_kfold)
     ap.add_argument("--wandb_project", type=str, default="kfold")
     ap.add_argument("--wandb_run_name", type=str, default=None)
-    ap.add_argument("--wandb_log_every", type=int, default=10, help="Log train step every N steps (0=off)")
     ap.add_argument("--no_wandb", action="store_true")
-
-    ap.add_argument("--device", type=str, default="auto")
 
     args = ap.parse_args()
 
@@ -617,7 +499,7 @@ def main():
         raise FileNotFoundError(f"data not found: {data_path}")
 
     device = pick_device(args.device)
-    print(f"[info] device={device} | model=mlp")
+    print(f"[info] device={device} | model=lightgbm")
 
     data: HeteroData = torch.load(data_path, map_location="cpu", weights_only=False)
     if not isinstance(data, HeteroData):
@@ -646,6 +528,10 @@ def main():
         print(f"[warn] non-finite y; using subset: {full_idx.numel()}/{y.numel()}")
 
     neighbor_types = ["engineers", "tasks", "task_types", "districts", "departments"]
+    normalize_node_features_inplace(data, drop_const=True)
+    in_dims = ensure_all_node_types_have_x(data)
+    data = sanitize_for_neighbor_loader(data)
+    num_neighbors = {et: [args.num_neighbors] * args.layers for et in data.edge_types}
 
     seed_list = parse_seeds_arg(args.seeds, args.seeds_file)
     if seed_list is None:
@@ -654,13 +540,14 @@ def main():
     all_summaries: List[Dict[str, Any]] = []
     for si, seed in enumerate(seed_list.tolist()):
         torch.manual_seed(int(seed))
+        np.random.seed(int(seed))
         print(f"\n[seed {seed}] ({si + 1}/{seed_list.numel()})")
         if args.k >= 2:
             folds = make_kfold_splits(full_idx, k=args.k, seed=int(seed))
-            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{int(seed)}"
+            group_name = f"{args.wandb_run_name or 'kfold'}-lightgbm-seed{int(seed)}"
             for fold, val_idx in enumerate(folds):
                 train_idx = complement(full_idx, val_idx)
-                summary = run_one_fold_mlp(
+                summary = run_one_fold_lightgbm(
                     base_data=data,
                     target=target,
                     train_idx=train_idx,
@@ -670,14 +557,16 @@ def main():
                     fold=fold,
                     group_name=group_name,
                     neighbor_types=neighbor_types,
+                    in_dims=in_dims,
+                    num_neighbors=num_neighbors,
                     use_wandb=not args.no_wandb,
                 )
                 summary["seed"] = int(seed)
                 all_summaries.append(summary)
         else:
             train_idx, val_idx, _ = split_indices(full_idx, int(seed), 0.8, 0.1)
-            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{int(seed)}"
-            summary = run_one_fold_mlp(
+            group_name = f"{args.wandb_run_name or 'kfold'}-lightgbm-seed{int(seed)}"
+            summary = run_one_fold_lightgbm(
                 base_data=data,
                 target=target,
                 train_idx=train_idx,
@@ -687,12 +576,14 @@ def main():
                 fold=0,
                 group_name=group_name,
                 neighbor_types=neighbor_types,
+                in_dims=in_dims,
+                num_neighbors=num_neighbors,
                 use_wandb=not args.no_wandb,
             )
             summary["seed"] = int(seed)
             all_summaries.append(summary)
 
-    out_dir = Path("checkpoints") / (args.wandb_run_name or "kfold") / "mlp"
+    out_dir = Path("checkpoints") / (args.wandb_run_name or "kfold") / "lightgbm"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "kfold_summary.json"
     out_path.write_text(json.dumps(all_summaries, indent=2))
