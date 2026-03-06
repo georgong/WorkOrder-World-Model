@@ -393,6 +393,8 @@ def run_one_fold_mlp(
     group_name: str,
     neighbor_types: List[str],
     use_wandb: bool = True,
+    out_dir: Optional[Path] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     data = base_data.clone()
     data[target].y = data[target].y.float()
@@ -469,6 +471,7 @@ def run_one_fold_mlp(
     best_val_sl1 = float("inf")
     best_val_rmse = float("inf")
     best_epoch = -1
+    best_state: Optional[Dict[str, torch.Tensor]] = None
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -532,6 +535,7 @@ def run_one_fold_mlp(
             best_val_sl1 = val_sl1
             best_val_rmse = min(best_val_rmse, val_rmse)
             best_epoch = epoch
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
         if device.type == "mps":
             torch.mps.empty_cache()
@@ -551,7 +555,7 @@ def run_one_fold_mlp(
         )
         wandb.finish()
 
-    return {
+    summary = {
         "fold": fold,
         "model": "mlp",
         "best_epoch": best_epoch,
@@ -559,6 +563,13 @@ def run_one_fold_mlp(
         "best_val_rmse": best_val_rmse,
         "baseline_val_smoothl1": baseline_val,
     }
+    if out_dir is not None and seed is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"seed{seed}_fold{fold:02d}"
+        (out_dir / f"{prefix}.json").write_text(json.dumps(summary, indent=2))
+        if best_state is not None:
+            torch.save(best_state, out_dir / f"{prefix}.pt")
+    return summary
 
 
 # -------------------------
@@ -573,7 +584,7 @@ def main():
     ap.add_argument("--label_key", type=str, default="y")
 
     # k-fold
-    ap.add_argument("--k", type=int, default=4)
+    ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--seeds", type=str, default=None)
     ap.add_argument("--seeds_file", type=str, default=None)
@@ -651,13 +662,17 @@ def main():
     if seed_list is None:
         seed_list = torch.tensor([args.seed], dtype=torch.long)
 
+    out_dir = Path("checkpoints") / "piecewise"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
     all_summaries: List[Dict[str, Any]] = []
     for si, seed in enumerate(seed_list.tolist()):
-        torch.manual_seed(int(seed))
+        seed_int = int(seed)
+        torch.manual_seed(seed_int)
         print(f"\n[seed {seed}] ({si + 1}/{seed_list.numel()})")
         if args.k >= 2:
-            folds = make_kfold_splits(full_idx, k=args.k, seed=int(seed))
-            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{int(seed)}"
+            folds = make_kfold_splits(full_idx, k=args.k, seed=seed_int)
+            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{seed_int}"
             for fold, val_idx in enumerate(folds):
                 train_idx = complement(full_idx, val_idx)
                 summary = run_one_fold_mlp(
@@ -671,12 +686,14 @@ def main():
                     group_name=group_name,
                     neighbor_types=neighbor_types,
                     use_wandb=not args.no_wandb,
+                    out_dir=out_dir,
+                    seed=seed_int,
                 )
-                summary["seed"] = int(seed)
+                summary["seed"] = seed_int
                 all_summaries.append(summary)
         else:
-            train_idx, val_idx, _ = split_indices(full_idx, int(seed), 0.8, 0.1)
-            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{int(seed)}"
+            train_idx, val_idx, _ = split_indices(full_idx, seed_int, 0.8, 0.1)
+            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{seed_int}"
             summary = run_one_fold_mlp(
                 base_data=data,
                 target=target,
@@ -688,12 +705,12 @@ def main():
                 group_name=group_name,
                 neighbor_types=neighbor_types,
                 use_wandb=not args.no_wandb,
+                out_dir=out_dir,
+                seed=seed_int,
             )
-            summary["seed"] = int(seed)
+            summary["seed"] = seed_int
             all_summaries.append(summary)
 
-    out_dir = Path("checkpoints") / (args.wandb_run_name or "kfold") / "mlp"
-    out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "kfold_summary.json"
     out_path.write_text(json.dumps(all_summaries, indent=2))
     print(f"\n[ok] wrote summary -> {out_path}")
