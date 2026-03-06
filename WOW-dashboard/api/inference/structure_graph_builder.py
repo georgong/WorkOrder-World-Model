@@ -16,10 +16,8 @@ from .feature_engineering import (
     process_districts_feature,
     process_engineer_feature,
     process_task_feature,
-    #process_equipments_feature,
 )
 from .feature_schema import assignment_schema, district_schema, engineer_schema, task_schema #equipment_schema
-from ..process.utils.pipeline_logger import PipelineLogger
 
 
 DTYPE_MAP = {
@@ -59,12 +57,8 @@ preprocessing_dict = {
     "assignments": {"func": process_assignment_feature, "schema": assignment_schema},
     "districts": {"func": process_districts_feature, "schema": district_schema},
     "engineers": {"func": process_engineer_feature, "schema": engineer_schema},
-    # departments / task_types / task_statuses / equipment / regions 目前没给 func，就先用“原始数值列”兜底
+    # departments / task_types / task_statuses / equipment / regions
 }
-
-# This is used in _build_edges_by_shared_edge_trait() to avoid memory explosion for very large groups
-# MAX_NODES_PER_GROUP = 2000
-# MAX_EDGES_PER_GROUP = 10000
 
 
 # -------------------------
@@ -118,7 +112,7 @@ def get_trait_cols(schema: Dict[str, Any], table_name: str) -> Tuple[List[str], 
             node_cols.append(col)
         elif (info or {}).get("trait_type") == "edge":
             edge_cols.append(col)
-    # 去重保持顺序
+    
     node_cols = list(dict.fromkeys(node_cols))
     edge_cols = list(dict.fromkeys(edge_cols))
     return node_cols, edge_cols
@@ -382,7 +376,7 @@ def project_metapath_edges(
     rel1: tuple[str, str, str],  # (src, r1, mid1)
     rel2: tuple[str, str, str],  # (mid1, r2, mid2)
     rel3: tuple[str, str, str],  # (mid2, r3, dst)
-    min_count: int = 1,          # 出现次数阈值，可选
+    min_count: int = 1,          
 ) -> torch.Tensor:
     """
     Project rel1 ∘ rel2 ∘ rel3 into a direct edge_index from src -> dst
@@ -416,7 +410,7 @@ def project_metapath_edges(
     A3 = SparseTensor(row=ei3[0], col=ei3[1], sparse_sizes=(n_mid2, n_dst))
 
     P = (A1 @ A2) @ A3  # sparse matmul
-    row, col, val = P.coo()  # val = 路径数（加和）
+    row, col, val = P.coo() 
 
     if min_count > 1:
         keep = val >= min_count
@@ -438,7 +432,6 @@ class GraphBuilder:
     def __init__(self, *, yaml: Dict[str, Any], data_dir: str = "data/raw") -> None:
         self.yaml = yaml
         self.data_dir = data_dir
-        self.logger = PipelineLogger()
 
         assert "datasets" in self.yaml, "YAML missing top-level 'datasets'"
         assert "mappings" in self.yaml, "YAML missing top-level 'mappings'"
@@ -513,14 +506,11 @@ class GraphBuilder:
     def _build_engineer_task_type_edges_from_graph(self) -> None:
         # engineers <-> task_types
 
-        # 你得把这三个 rel 改成你自己图里真实存在的 edge_types
-        # 最稳的办法：print(self.data.edge_types) 看一眼再填
+    
         rel_ea = ("engineers", "relates_to", "assignments")
         rel_at = ("assignments", "relates_to", "tasks")
         rel_tt = ("tasks", "relates_to", "task_types")
 
-        # 如果你实际是反向边，比如 ("assignments","rev_relates_to","engineers")
-        # 就换成你想要的方向，或者直接用 flip(0)
 
         for rel in [rel_ea, rel_at, rel_tt]:
             assert rel in self.data.edge_types, f"Missing edge type {rel}. Existing: {self.data.edge_types}"
@@ -530,7 +520,7 @@ class GraphBuilder:
             rel1=rel_ea,
             rel2=rel_at,
             rel3=rel_tt,
-            min_count=1,   # 你也可以设成 2/3，过滤掉“只出现一次”的弱关联
+            min_count=1,   
         )
 
         rel = ("engineers", "works_on_type", "task_types")
@@ -539,7 +529,6 @@ class GraphBuilder:
 
         print(f"Total edges built in _build_engineer_task_type_edges_from_graph(): {edge_index.shape[1]}")
 
-        self.logger.log("graph_build_up", f"{rel}: edge_index={tuple(edge_index.shape)}")
         print(rel, edge_index.shape)
 
     def _preprocess_df(self, df_concat, vars_meta):
@@ -584,7 +573,6 @@ class GraphBuilder:
                     df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
 
                 after_count = df_concat.height
-                self.logger.log("filter_row",f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
                 print(f"Column '{col}' (numeric): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
             
             elif outlier_type == "datetime":
@@ -598,17 +586,12 @@ class GraphBuilder:
                     df_concat = df_concat.filter(pl.col(col).is_null() | (pl.col(col) <= upper_val))
 
                 after_count = df_concat.height
-                self.logger.log("filter_row",f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
                 print(f"Column '{col}' (datetime): kept {after_count} / {before_count} rows (filtered {before_count - after_count})")
 
             else:
-                self.logger.log("filter_row",f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
                 raise ValueError(f"Unknown outlier_type {outlier_type!r} for column {col!r}. Please fix the yaml config file.")
 
         return df_concat
-
-    def setup_logger(self) -> Logger:
-        return Logger(__name__)
 
     def _load_all_tables(self) -> None:
         for t in self.yaml["mappings"].keys():
@@ -698,22 +681,22 @@ class GraphBuilder:
         if target_col in attr_name:
             k = attr_name.index(target_col)
 
-            # 1. 拿出来当 y
+            
             y = X[:, k].clone()
 
-            # 2. 从 x 里删除这一列
+            
             X_new = torch.cat([X[:, :k], X[:, k+1:]], dim=1)
 
-            # 3. 更新 attr_name
+            
             new_attr_name = attr_name[:k] + attr_name[k+1:]
 
-            # 4. 写回
+            
             self.data[node_type].x = X_new
             self.data[node_type].y = y
             self.data[node_type].attr_name = new_attr_name
 
         else:
-            # 没有 target，就正常塞 x
+           
             self.data[node_type].x = X
 
         # 5) store masks (which columns are hidden at prediction time) as metadata lists
@@ -732,8 +715,6 @@ class GraphBuilder:
             self._build_nodes_one(node_type)
 
     def _build_edges(self) -> None:
-        import torch
-
         for src_type, src_cfg in self.yaml["mappings"].items():
             links = src_cfg.get("links") or {}
             if not links:
@@ -755,32 +736,6 @@ class GraphBuilder:
                 right_on = link["right_on"]
                 edge_type = link.get("edge_type", "relates_to")
 
-                rel = (src_type, edge_type, dst_type)
-                rev_rel = (dst_type, f"rev_{edge_type}", src_type)
-
-                # -------------------------
-                # 1) 如果这个 rel 已经有边了，直接跳过
-                # -------------------------
-                ei_existing = getattr(self.data[rel], "edge_index", None)
-                if isinstance(ei_existing, torch.Tensor) and ei_existing.numel() > 0 and ei_existing.size(1) > 0:
-                    continue
-
-                # -------------------------
-                # 2) 如果这个 rel 实际上已经被“自动 reverse”覆盖了，也跳过
-                #    规则：如果 rel 的 edge_type 形如 rev_X，
-                #    且 forward (dst, X, src) 已经存在且非空，那么 rel 就别再建
-                # -------------------------
-                if isinstance(edge_type, str) and edge_type.startswith("rev_"):
-                    base = edge_type[len("rev_"):]
-                    forward = (dst_type, base, src_type)  # reverse-of-forward
-                    if forward in self.data.edge_types:
-                        ei_fwd = getattr(self.data[forward], "edge_index", None)
-                        if isinstance(ei_fwd, torch.Tensor) and ei_fwd.numel() > 0 and ei_fwd.size(1) > 0:
-                            continue
-
-                # -------------------------
-                # 3) 真正构建
-                # -------------------------
                 edge_index = build_edge_index_only(
                     left_df=src_df,
                     right_df=dst_df,
@@ -793,6 +748,7 @@ class GraphBuilder:
                     keep_order_from="left",
                 )
 
+                rel = (src_type, edge_type, dst_type)
                 self.data[rel].edge_index = edge_index
 
                 # reverse edge (optional but usually helpful)
@@ -860,7 +816,6 @@ class GraphBuilder:
                     CustomEdgeConstructor.build_shared_edges_context_node(
                         groups, entity_key, id_to_idx, node_type, group_label, data_store=self.data
                     )
-                    ...
                 elif edge_construct == "neighbor":
                     CustomEdgeConstructor.build_shared_edges_random_k_neighbors(
                         groups, entity_key, id_to_idx, node_type, group_label, k=meta.get("neighbor_k", 3), max_nodes_per_group=self.MAX_NODES_PER_GROUP, data_store=self.data
@@ -869,7 +824,6 @@ class GraphBuilder:
                     CustomEdgeConstructor.build_shared_edges_pairwise(
                         groups, entity_key, id_to_idx, node_type, group_label, max_edges_per_group=self.MAX_EDGES_PER_GROUP, data_store=self.data
                     )
-                    ...
 
     def build(self) -> HeteroData:
         self._load_all_tables()
@@ -901,29 +855,16 @@ class GraphBuilder:
             num_nodes = node_storage.num_nodes
             if hasattr(node_storage, "node_ids"):
                 node_ids_len = len(node_storage.node_ids)
-                self.logger.log(
-                    "graph_build_up",
-                    f"{ntype}: feature_shape={tuple(node_storage.x.shape)}, num_nodes={node_ids_len}"
-                )
                 print(ntype, node_storage.x.shape, node_ids_len)
             else:
-                self.logger.log(
-                    "graph_build_up",
-                    f"{ntype}: feature_shape={tuple(node_storage.x.shape)}, num_nodes={num_nodes}"
-                )
                 print(ntype, node_storage.x.shape, num_nodes)
         
-        for etype in self.data.edge_types:
-            self.logger.log(
-                "graph_build_up",
-                f"{etype}: feature_shape={self.data[etype].edge_index.shape}"
-            )
+        for etype in self.data.edge_types[:10]:
             print(etype, self.data[etype].edge_index.shape)
 
         total_edges = sum(self.data[etype].edge_index.shape[1] for etype in self.data.edge_types)
         print(f"Total number of edges: {total_edges}")
 
-        self.logger.dump("pipeline_log.txt")
         return self.data
     
 class CustomEdgeConstructor:
@@ -1149,27 +1090,3 @@ class CustomEdgeConstructor:
             f"[context-node] {node_type} --{edge_type}--> {context_node_type} | "
             f"context_nodes={num_context_nodes}, edges={edge_index.size(1)}"
         )
-
-
-
-def main(schema: Dict[str, Any]) -> None:
-    gb = GraphBuilder(yaml=schema, data_dir="data/raw")
-    g = gb.build()
-
-    # quick peek
-
-    # torch.save(g, "data/graph/sdge.pt")
-    
-
-    output_path = 'data/graph'
-    graph_name = schema.get('graph_name', 'sdge.pt')
-    os.makedirs(output_path, exist_ok=True)
-    torch.save(g, output_path + '/' + graph_name)
-
-
-if __name__ == "__main__":
-    # How to run:
-    # python -m src.process.structure_graph_builder
-    with open("configs/graph.yaml", "r") as f:
-        schema = yaml.safe_load(f)
-    main(schema)

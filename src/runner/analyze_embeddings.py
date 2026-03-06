@@ -1,0 +1,1031 @@
+# src/runner/analyze_embeddings.py
+"""
+Analyze and compare RGCN vs GraphSAGE model performance,
+and investigate district/department embedded representations.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Dict, List, Tuple
+from collections import defaultdict
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from tqdm import tqdm
+
+from torch_geometric.data import HeteroData
+from torch_geometric.loader import NeighborLoader
+from torch_geometric.nn import HeteroConv, GraphConv
+
+from src.model.gnn import HeteroSAGERegressor
+
+# -------------------------
+# models (copied and modified from src/model/gnn.py for self-containment)
+# Don't import directly and allow modifications for analysis purposes.
+# -------------------------
+class HeteroGCN(torch.nn.Module):
+    def __init__(self, metadata, hidden, out_dim):
+        super().__init__()
+
+        self.conv1 = HeteroConv({
+            edge_type: GraphConv(-1, hidden)
+            for edge_type in metadata[1]
+        }, aggr="sum")
+
+        self.conv2 = HeteroConv({
+            edge_type: GraphConv(hidden, out_dim)
+            for edge_type in metadata[1]
+        }, aggr="sum")
+
+    def forward(self, data):
+        x_dict = self.conv1(data.x_dict, data.edge_index_dict)
+        x_dict = {k: v.relu() for k, v in x_dict.items()}
+        x_dict = self.conv2(x_dict, data.edge_index_dict)
+        return x_dict
+
+# -------------------------
+# graph subsampling for demo mode
+# -------------------------
+def subsample_hetero_graph(data: HeteroData, target: str, max_target_nodes: int = 500, seed: int = 42) -> HeteroData:
+    """Subsample a HeteroData graph to at most `max_target_nodes` target nodes
+    and only the neighbours reachable in one hop, to keep memory tiny."""
+    import copy
+
+    N = data[target].num_nodes
+    if N <= max_target_nodes:
+        print(f"[demo] target '{target}' has only {N} nodes, no subsampling needed.")
+        return data
+
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(N, generator=g)[:max_target_nodes]
+    perm, _ = perm.sort()
+
+    # Collect all nodes we need to keep per type (start with target subset)
+    keep: Dict[str, torch.Tensor] = {target: perm}
+
+    # First pass: find neighbour nodes connected to kept target nodes
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if src == target:
+            mask = torch.isin(ei[0], perm)
+            keep.setdefault(dst, []).append(ei[1][mask]) if isinstance(keep.get(dst), list) else None
+            if dst not in keep:
+                keep[dst] = ei[1][mask]
+            elif isinstance(keep[dst], list):
+                keep[dst].append(ei[1][mask])
+        if dst == target:
+            mask = torch.isin(ei[1], perm)
+            if src not in keep:
+                keep[src] = ei[0][mask]
+            elif isinstance(keep[src], list):
+                keep[src].append(ei[0][mask])
+            else:
+                keep[src] = torch.cat([keep[src], ei[0][mask]])
+
+    # Consolidate kept indices
+    for nt in list(keep.keys()):
+        v = keep[nt]
+        if isinstance(v, list):
+            v = torch.cat(v)
+        keep[nt] = torch.unique(v)
+
+    # For node types never touched, keep a small slice
+    for nt in data.node_types:
+        if nt not in keep:
+            keep[nt] = torch.arange(min(data[nt].num_nodes, 50))
+
+    # Build new data
+    new_data = HeteroData()
+
+    # Build old-to-new index maps
+    remap: Dict[str, torch.Tensor] = {}
+    for nt in data.node_types:
+        kept_idx = keep[nt]
+        n_old = data[nt].num_nodes
+        mapping = torch.full((n_old,), -1, dtype=torch.long)
+        mapping[kept_idx] = torch.arange(kept_idx.numel())
+        remap[nt] = mapping
+
+        # Copy node attributes
+        store = data[nt]
+        for key in store.keys():
+            val = store[key]
+            if isinstance(val, torch.Tensor) and val.size(0) == n_old:
+                new_data[nt][key] = val[kept_idx]
+            elif isinstance(val, torch.Tensor):
+                new_data[nt][key] = val
+        new_data[nt].num_nodes = kept_idx.numel()
+
+    # Remap edges
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        new_src = remap[src][ei[0]]
+        new_dst = remap[dst][ei[1]]
+        valid = (new_src >= 0) & (new_dst >= 0)
+        new_data[(src, rel, dst)].edge_index = torch.stack([new_src[valid], new_dst[valid]])
+
+    print(f"[demo] Subsampled graph: {N} → {keep[target].numel()} target nodes")
+    for nt in new_data.node_types:
+        print(f"  {nt}: {new_data[nt].num_nodes} nodes")
+    for et in new_data.edge_types:
+        print(f"  {et}: {new_data[et].edge_index.size(1)} edges")
+
+    return new_data
+
+
+# -------------------------
+# device
+# -------------------------
+def pick_device(s: str) -> torch.device:
+    s = s.lower()
+    if s == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    return torch.device(s)
+
+
+# -------------------------
+# normalization (same as training)
+# -------------------------
+@torch.no_grad()
+def normalize_node_features_inplace(
+    data: HeteroData, *, eps: float = 1e-6, drop_const: bool = True, const_std_thr: float = 1e-8,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    stats = {}
+    for nt in data.node_types:
+        if not hasattr(data[nt], "x"):
+            continue
+        x = data[nt].x
+        if not isinstance(x, torch.Tensor) or x.dim() != 2:
+            continue
+        if not x.is_floating_point():
+            x = x.float()
+        x = x.cpu()
+        mean = x.mean(dim=0)
+        var = x.var(dim=0, unbiased=False)
+        std = torch.sqrt(var + eps)
+        keep = torch.ones_like(std, dtype=torch.bool)
+        if drop_const:
+            keep = std > const_std_thr
+            if keep.sum().item() == 0:
+                keep[0] = True
+        x2 = (x[:, keep] - mean[keep]) / std[keep]
+        data[nt].x = x2
+        stats[nt] = {"mean": mean[keep], "std": std[keep], "keep_mask": keep}
+        if hasattr(data[nt], "attr_name"):
+            an = data[nt].attr_name
+            if isinstance(an, list) and len(an) == int(keep.numel()):
+                data[nt].attr_name = [an[i] for i in range(len(an)) if bool(keep[i].item())]
+    return stats
+
+
+def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
+    for nt in data.node_types:
+        store = data[nt]
+        for key in list(store.keys()):
+            v = store[key]
+            if isinstance(v, torch.Tensor):
+                continue
+            del store[key]
+    for et in data.edge_types:
+        store = data[et]
+        for key in list(store.keys()):
+            v = store[key]
+            if isinstance(v, torch.Tensor):
+                continue
+            del store[key]
+    return data
+
+
+def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
+    in_dims = {nt: data[nt].x.size(-1) for nt in data.node_types if hasattr(data[nt], "x")}
+    for nt in data.node_types:
+        if nt not in in_dims:
+            in_dims[nt] = 1
+            data[nt].x = torch.zeros((data[nt].num_nodes, 1), dtype=torch.float)
+    return in_dims
+
+
+def compute_target_degree(data: HeteroData, target: str, *, degree_mode: str = "in") -> torch.Tensor:
+    N = data[target].num_nodes
+    deg = torch.zeros(N, dtype=torch.long)
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if degree_mode in ("in", "inout") and dst == target:
+            deg += torch.bincount(ei[1], minlength=N)
+        if degree_mode in ("out", "inout") and src == target:
+            deg += torch.bincount(ei[0], minlength=N)
+    return deg
+
+
+def split_indices(idx, *, seed, train_ratio, val_ratio):
+    N = idx.numel()
+    g = torch.Generator().manual_seed(seed)
+    perm = idx[torch.randperm(N, generator=g)]
+    n_train = int(N * train_ratio)
+    n_val = int(N * val_ratio)
+    return perm[:n_train], perm[n_train:n_train + n_val], perm[n_train + n_val:]
+
+
+# -------------------------
+# evaluation
+# -------------------------
+@torch.no_grad()
+def eval_model(model, loader, target, device):
+    model.eval()
+    se_sum = ae_sum = sl1_sum = 0.0
+    n = 0
+    is_raw_gcn = isinstance(model, HeteroGCN)
+    for batch in tqdm(loader, desc="eval", leave=False):
+        batch = batch.to(device)
+        if is_raw_gcn:
+            x_dict = model(batch)
+            # No learned head — just use mean of target embeddings as prediction
+            pred = x_dict[target].mean(dim=-1)
+        else:
+            pred = model(batch)["pred"]
+        y = batch[target].y.float()
+        bs = int(batch[target].batch_size)
+        p, t = pred[:bs], y[:bs]
+        se_sum += F.mse_loss(p, t, reduction="sum").item()
+        ae_sum += F.l1_loss(p, t, reduction="sum").item()
+        sl1_sum += F.smooth_l1_loss(p, t, beta=1.0, reduction="sum").item()
+        n += bs
+    if n == 0:
+        return {"mse": float("nan"), "mae": float("nan"), "rmse": float("nan"), "smoothl1": float("nan")}
+    mse = se_sum / n
+    return {"mse": mse, "mae": ae_sum / n, "rmse": mse ** 0.5, "smoothl1": sl1_sum / n}
+
+
+# -------------------------
+# embedding analysis
+# -------------------------
+@torch.no_grad()
+def extract_embeddings(model, data, device, target, num_neighbors=3, layers=2, batch_size=256):
+    """Extract embeddings for all node types from a trained model."""
+    model.eval()
+
+    if isinstance(model, HeteroGCN):
+        # HeteroGCN is lightweight — but still avoid moving full graph if large
+        data_dev = data.to(device)
+        x_dict = model(data_dev)
+        return {k: v.cpu() for k, v in x_dict.items()}
+
+    # --- Always use mini-batching for HeteroSAGERegressor ---
+    result = {}
+
+    # Extract embeddings for each node type that has nodes
+    for ntype in data.node_types:
+        n = data[ntype].num_nodes
+        if n == 0:
+            continue
+
+        all_idx = torch.arange(n)
+        num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
+        loader = NeighborLoader(
+            data,
+            input_nodes=(ntype, all_idx),
+            num_neighbors=num_neighbors_dict,
+            batch_size=batch_size,
+            shuffle=False,
+        )
+
+        all_embs = []
+        for batch in tqdm(loader, desc=f"extracting embeddings [{ntype}]"):
+            batch = batch.to(device)
+            bs = batch[ntype].batch_size
+
+            x_dict = {nt: F.relu(model.in_proj[nt](batch[nt].x)) for nt in model.node_types if nt in batch.node_types}
+            for i, conv in enumerate(model.convs):
+                x_dict = conv(x_dict, batch.edge_index_dict)
+                x_dict = {k: F.relu(model.norms[i][k](v)) for k, v in x_dict.items()}
+
+            all_embs.append(x_dict[ntype][:bs].cpu())
+
+            del x_dict, batch
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        result[ntype] = torch.cat(all_embs, dim=0)
+
+    return result
+
+
+def analyze_district_department_embeddings(
+    embeddings: Dict[str, torch.Tensor],
+    data: HeteroData,
+):
+    """Analyze whether district and department embeddings form meaningful clusters."""
+    from sklearn.metrics import silhouette_score
+    from sklearn.cluster import KMeans
+    from scipy.spatial.distance import pdist, squareform
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append("District & Department Embedding Analysis")
+    lines.append("=" * 80)
+
+    for ntype in ["districts", "departments"]:
+        if ntype not in embeddings:
+            lines.append(f"\n[{ntype}] No embeddings found, skipping.")
+            continue
+
+        emb = embeddings[ntype].numpy()
+        n = emb.shape[0]
+        lines.append(f"\n[{ntype}] Embedding shape: {emb.shape}")
+
+        if n < 3:
+            lines.append(f"  Too few nodes ({n}) for clustering analysis.")
+            continue
+
+        # 1. Pairwise cosine similarity
+        from sklearn.metrics.pairwise import cosine_similarity
+        cos_sim = cosine_similarity(emb)
+        lines.append(f"  Cosine similarity: mean={cos_sim.mean():.4f}, std={cos_sim.std():.4f}")
+        lines.append(f"    min={cos_sim.min():.4f}, max={cos_sim.max():.4f}")
+
+        # 2. K-Means clustering
+        max_k = min(n - 1, 10)
+        best_k, best_sil = 2, -1
+        for k in range(2, max_k + 1):
+            km = KMeans(n_clusters=k, random_state=42, n_init=10)
+            labels = km.fit_predict(emb)
+            sil = silhouette_score(emb, labels)
+            if sil > best_sil:
+                best_sil = sil
+                best_k = k
+        lines.append(f"  Best K-Means: k={best_k}, silhouette={best_sil:.4f}")
+
+        # 3. Variance explained by clusters
+        km = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+        labels = km.fit_predict(emb)
+        total_var = np.var(emb, axis=0).sum()
+        within_var = sum(np.var(emb[labels == c], axis=0).sum() for c in range(best_k)) / best_k
+        var_explained = 1 - within_var / total_var if total_var > 0 else 0
+        lines.append(f"  Variance explained by {best_k} clusters: {var_explained:.4f}")
+
+        # 4. Per-cluster sizes
+        from collections import Counter
+        cluster_counts = Counter(labels)
+        lines.append(f"  Cluster sizes: {dict(sorted(cluster_counts.items()))}")
+
+        # 5. Top-3 most similar pairs
+        np.fill_diagonal(cos_sim, -1)
+        flat_idx = np.argsort(cos_sim.ravel())[::-1]
+        lines.append(f"  Top-3 most similar pairs:")
+        seen = set()
+        count = 0
+        for idx in flat_idx:
+            i, j = divmod(idx, n)
+            if (min(i, j), max(i, j)) in seen:
+                continue
+            seen.add((min(i, j), max(i, j)))
+            lines.append(f"    {ntype}[{i}] ↔ {ntype}[{j}]: cosine={cos_sim[i, j]:.4f}")
+            count += 1
+            if count >= 3:
+                break
+
+        # 6. Top-3 most dissimilar pairs
+        np.fill_diagonal(cos_sim, 2)
+        flat_idx = np.argsort(cos_sim.ravel())
+        lines.append(f"  Top-3 most dissimilar pairs:")
+        seen = set()
+        count = 0
+        for idx in flat_idx:
+            i, j = divmod(idx, n)
+            if i == j:
+                continue
+            if (min(i, j), max(i, j)) in seen:
+                continue
+            seen.add((min(i, j), max(i, j)))
+            lines.append(f"    {ntype}[{i}] ↔ {ntype}[{j}]: cosine={cos_sim[i, j]:.4f}")
+            count += 1
+            if count >= 3:
+                break
+
+    return "\n".join(lines)
+
+
+def analyze_district_department_combinations(
+    embeddings: Dict[str, torch.Tensor],
+    data: HeteroData,
+    target: str = "assignments", 
+):
+    """Analyze whether combinations of district+department form meaningful representations."""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("District × Department Combination Analysis")
+    lines.append("=" * 80)
+
+    if "districts" not in embeddings or "departments" not in embeddings:
+        lines.append("Missing district or department embeddings.")
+        return "\n".join(lines)
+
+    dist_emb = embeddings["districts"]
+    dept_emb = embeddings["departments"]
+
+    lines.append(f"Districts: {dist_emb.shape[0]} nodes, embedding dim={dist_emb.shape[1]}")
+    lines.append(f"Departments: {dept_emb.shape[0]} nodes, embedding dim={dept_emb.shape[1]}")
+
+    # Find which tasks connect to which districts and departments
+    task_to_district = {}
+    task_to_department = {}
+
+    for etype in data.edge_types:
+        src, rel, dst = etype
+        ei = data[etype].edge_index
+        if src == target and dst == "districts":        # <-- use target
+            for i in range(ei.shape[1]):
+                task_to_district[ei[0, i].item()] = ei[1, i].item()
+        elif src == target and dst == "departments":    # <-- use target
+            for i in range(ei.shape[1]):
+                task_to_department[ei[0, i].item()] = ei[1, i].item()
+        elif dst == target and src == "districts":      # <-- also check reverse edges
+            for i in range(ei.shape[1]):
+                task_to_district[ei[1, i].item()] = ei[0, i].item()
+        elif dst == target and src == "departments":    # <-- also check reverse edges
+            for i in range(ei.shape[1]):
+                task_to_department[ei[1, i].item()] = ei[0, i].item()
+
+    # Build district-department combinations
+    combo_to_tasks = defaultdict(list)
+    for t_id in range(data["tasks"].num_nodes):
+        d = task_to_district.get(t_id)
+        p = task_to_department.get(t_id)
+        if d is not None and p is not None:
+            combo_to_tasks[(d, p)].append(t_id)
+
+    lines.append(f"\nUnique (district, department) combinations: {len(combo_to_tasks)}")
+    lines.append(f"Tasks with both district and department: {sum(len(v) for v in combo_to_tasks.values())}")
+
+    # Analyze combination embeddings (concatenation of district + department embeddings)
+    combo_keys = list(combo_to_tasks.keys())
+    if len(combo_keys) < 3:
+        lines.append("Too few combinations for analysis.")
+        return "\n".join(lines)
+
+    combo_embs = []
+    combo_labels = []
+    combo_sizes = []
+    for d, p in combo_keys:
+        if d < dist_emb.shape[0] and p < dept_emb.shape[0]:
+            combined = torch.cat([dist_emb[d], dept_emb[p]], dim=0)
+            combo_embs.append(combined)
+            combo_labels.append(f"dist{d}_dept{p}")
+            combo_sizes.append(len(combo_to_tasks[(d, p)]))
+
+    if len(combo_embs) < 3:
+        lines.append("Too few valid combinations for analysis.")
+        return "\n".join(lines)
+
+    combo_embs = torch.stack(combo_embs).numpy()
+    lines.append(f"Valid combinations for analysis: {len(combo_embs)}")
+    lines.append(f"Combined embedding dim: {combo_embs.shape[1]}")
+
+    # Cosine similarity of combination embeddings
+    from sklearn.metrics.pairwise import cosine_similarity
+    cos_sim = cosine_similarity(combo_embs)
+    lines.append(f"\nCombination cosine similarity: mean={cos_sim.mean():.4f}, std={cos_sim.std():.4f}")
+
+    # Clustering of combinations
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    max_k = min(len(combo_embs) - 1, 10)
+    best_k, best_sil = 2, -1
+    for k in range(2, max_k + 1):
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = km.fit_predict(combo_embs)
+        sil = silhouette_score(combo_embs, labels)
+        if sil > best_sil:
+            best_sil = sil
+            best_k = k
+    lines.append(f"Best K-Means for combinations: k={best_k}, silhouette={best_sil:.4f}")
+
+    # Show cluster composition
+    km = KMeans(n_clusters=best_k, random_state=42, n_init=10)
+    labels = km.fit_predict(combo_embs)
+    lines.append(f"\nCluster composition (top combinations per cluster):")
+    for c in range(best_k):
+        members = [(combo_labels[i], combo_sizes[i]) for i in range(len(labels)) if labels[i] == c]
+        members.sort(key=lambda x: x[1], reverse=True)
+        lines.append(f"  Cluster {c}: {len(members)} combinations")
+        for label, size in members[:5]:
+            lines.append(f"    {label}: {size} tasks")
+
+    # Correlation between combination embedding distance and task count similarity
+    from scipy.stats import pearsonr
+    combo_sizes_arr = np.array(combo_sizes, dtype=float)
+    n = len(combo_embs)
+    dists = []
+    size_diffs = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dists.append(1 - cos_sim[i, j])
+            size_diffs.append(abs(combo_sizes_arr[i] - combo_sizes_arr[j]))
+    if len(dists) > 2:
+        corr, pval = pearsonr(dists, size_diffs)
+        lines.append(f"\nCorrelation between embedding distance and task count difference:")
+        lines.append(f"  Pearson r={corr:.4f}, p={pval:.2g}")
+
+    return "\n".join(lines)
+
+def analyze_assignment_district_department_relationship(
+    embeddings: Dict[str, torch.Tensor],
+    data: HeteroData,
+    target: str = "assignments",
+    max_samples: int = 5000,
+):
+    """Analyze whether assignments that share the same district/department
+    have more similar embeddings than random pairs.
+    This validates whether adding direct target→district/department edges would be meaningful."""
+    from sklearn.metrics.pairwise import cosine_similarity
+    from scipy.stats import mannwhitneyu
+    from collections import defaultdict
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append(f"Assignment ↔ District/Department Relationship Analysis (via 2-hop)")
+    lines.append("=" * 80)
+
+    if target not in embeddings:
+        lines.append(f"No embeddings found for '{target}', skipping.")
+        return "\n".join(lines)
+
+    target_emb = embeddings[target]
+    n_target = target_emb.shape[0]
+
+    # --- Build 2-hop adjacency: target → intermediate → {districts, departments} ---
+    # Forward adjacency: (src_type, dst_type) -> {src_id: set(dst_ids)}
+    adj_fwd: Dict[Tuple[str, str], Dict[int, set]] = {}
+    for (src, rel, dst) in data.edge_types:
+        ei = data[(src, rel, dst)].edge_index
+        if ei.shape[1] == 0:
+            continue
+        key = (src, dst)
+        if key not in adj_fwd:
+            adj_fwd[key] = defaultdict(set)
+        for i in range(ei.shape[1]):
+            adj_fwd[key][ei[0, i].item()].add(ei[1, i].item())
+
+    def resolve_2hop(target_type: str, dest_type: str) -> Dict[int, set]:
+        """Resolve target → dest_type via 1-hop and 2-hop paths."""
+        result: Dict[int, set] = defaultdict(set)
+
+        # 1-hop
+        if (target_type, dest_type) in adj_fwd:
+            for t, dests in adj_fwd[(target_type, dest_type)].items():
+                result[t].update(dests)
+
+        # 2-hop: target → mid → dest
+        for (src1, mid), mapping1 in adj_fwd.items():
+            if src1 != target_type or mid == dest_type:
+                continue
+            if (mid, dest_type) not in adj_fwd:
+                continue
+            mapping2 = adj_fwd[(mid, dest_type)]
+            for t, mids in mapping1.items():
+                for m in mids:
+                    if m in mapping2:
+                        result[t].update(mapping2[m])
+
+        return result
+
+    for dest_type in ["districts", "departments"]:
+        lines.append(f"\n{'─' * 60}")
+        lines.append(f"  {target} → {dest_type} (2-hop resolution)")
+        lines.append(f"{'─' * 60}")
+
+        target_to_dest = resolve_2hop(target, dest_type)
+
+        if not target_to_dest:
+            lines.append(f"  No 2-hop path found from '{target}' to '{dest_type}'.")
+            continue
+
+        # Show paths found
+        paths = []
+        if (target, dest_type) in adj_fwd:
+            paths.append(f"{target} → {dest_type} (direct)")
+        for (src1, mid), _ in adj_fwd.items():
+            if src1 == target and mid != dest_type and (mid, dest_type) in adj_fwd:
+                paths.append(f"{target} → {mid} → {dest_type}")
+        lines.append(f"  Paths found: {', '.join(paths)}")
+        lines.append(f"  {target} nodes with resolved {dest_type}: {len(target_to_dest)} / {n_target}")
+
+        # Group assignments by their destination node
+        dest_to_targets: Dict[int, List[int]] = defaultdict(list)
+        for t_id, dests in target_to_dest.items():
+            for d in dests:
+                if t_id < n_target:  # guard against subsampling mismatch
+                    dest_to_targets[d].append(t_id)
+
+        # Filter groups with at least 2 members
+        valid_groups = {d: ts for d, ts in dest_to_targets.items() if len(ts) >= 2}
+        lines.append(f"  {dest_type} nodes with ≥2 assignments: {len(valid_groups)}")
+        lines.append(f"  Group sizes: min={min(len(v) for v in valid_groups.values())}, "
+                     f"max={max(len(v) for v in valid_groups.values())}, "
+                     f"mean={np.mean([len(v) for v in valid_groups.values()]):.1f}")
+
+        if len(valid_groups) < 2:
+            lines.append(f"  Too few groups for comparison.")
+            continue
+
+        # --- Compute intra-group vs inter-group cosine similarity ---
+        rng = np.random.RandomState(42)
+        intra_sims = []
+        inter_sims = []
+
+        group_keys = list(valid_groups.keys())
+
+        # Sample intra-group pairs
+        for d, members in valid_groups.items():
+            members = np.array(members)
+            if len(members) > 100:
+                members = rng.choice(members, 100, replace=False)
+            if len(members) < 2:
+                continue
+            embs = target_emb[members].numpy()
+            cs = cosine_similarity(embs)
+            # Upper triangle only (exclude diagonal)
+            idx_upper = np.triu_indices(len(members), k=1)
+            intra_sims.extend(cs[idx_upper].tolist())
+            if len(intra_sims) > max_samples:
+                break
+
+        # Sample inter-group pairs (random pairs from different groups)
+        n_inter = min(len(intra_sims), max_samples)
+        for _ in range(n_inter):
+            g1, g2 = rng.choice(len(group_keys), 2, replace=False)
+            t1 = rng.choice(valid_groups[group_keys[g1]])
+            t2 = rng.choice(valid_groups[group_keys[g2]])
+            if t1 < n_target and t2 < n_target:
+                sim = F.cosine_similarity(
+                    target_emb[t1].unsqueeze(0),
+                    target_emb[t2].unsqueeze(0),
+                ).item()
+                inter_sims.append(sim)
+
+        intra_arr = np.array(intra_sims)
+        inter_arr = np.array(inter_sims)
+
+        lines.append(f"\n  Intra-{dest_type} similarity (same {dest_type}):")
+        lines.append(f"    n={len(intra_arr)}, mean={intra_arr.mean():.4f}, "
+                     f"std={intra_arr.std():.4f}, median={np.median(intra_arr):.4f}")
+        lines.append(f"  Inter-{dest_type} similarity (different {dest_type}):")
+        lines.append(f"    n={len(inter_arr)}, mean={inter_arr.mean():.4f}, "
+                     f"std={inter_arr.std():.4f}, median={np.median(inter_arr):.4f}")
+
+        # Statistical test
+        if len(intra_arr) > 10 and len(inter_arr) > 10:
+            stat, pval = mannwhitneyu(intra_arr, inter_arr, alternative="greater")
+            effect_size = (intra_arr.mean() - inter_arr.mean()) / max(
+                np.sqrt((intra_arr.std() ** 2 + inter_arr.std() ** 2) / 2), 1e-8
+            )
+            lines.append(f"\n  Mann-Whitney U test (intra > inter):")
+            lines.append(f"    U={stat:.0f}, p={pval:.2g}")
+            lines.append(f"    Cohen's d (effect size): {effect_size:.4f}")
+
+            if pval < 0.01 and effect_size > 0.2:
+                lines.append(f"  ✅ SIGNIFICANT: Assignments sharing the same {dest_type} have MORE similar embeddings.")
+                lines.append(f"     → Adding direct {target}→{dest_type} edges is JUSTIFIED.")
+            elif pval < 0.05:
+                lines.append(f"  ⚠️  WEAK SIGNAL: Some similarity structure exists for {dest_type}.")
+                lines.append(f"     → Direct edges may help but effect is modest.")
+            else:
+                lines.append(f"  ❌ NOT SIGNIFICANT: No evidence that {dest_type} groups assignment embeddings.")
+                lines.append(f"     → Direct edges to {dest_type} may not add value.")
+
+        # --- Bonus: do district/department embeddings correlate with mean assignment embedding? ---
+        if dest_type in embeddings:
+            dest_emb = embeddings[dest_type]
+            lines.append(f"\n  {dest_type.capitalize()} embedding vs mean assignment embedding correlation:")
+            mean_target_per_dest = []
+            dest_indices = []
+            for d, members in valid_groups.items():
+                if d < dest_emb.shape[0]:
+                    mean_emb = target_emb[members].mean(dim=0)
+                    mean_target_per_dest.append(mean_emb)
+                    dest_indices.append(d)
+
+            if len(mean_target_per_dest) >= 3:
+                mean_stack = torch.stack(mean_target_per_dest).numpy()
+                dest_stack = dest_emb[dest_indices].numpy()
+                # Row-wise cosine similarity between paired vectors
+                from sklearn.metrics.pairwise import cosine_similarity as cs_fn
+                paired_sims = [cs_fn(mean_stack[i:i+1], dest_stack[i:i+1])[0, 0]
+                               for i in range(len(dest_indices))]
+                paired_arr = np.array(paired_sims)
+                lines.append(f"    Cosine similarity (mean assignment emb ↔ {dest_type} emb):")
+                lines.append(f"      mean={paired_arr.mean():.4f}, std={paired_arr.std():.4f}, "
+                             f"min={paired_arr.min():.4f}, max={paired_arr.max():.4f}")
+                if paired_arr.mean() > 0.5:
+                    lines.append(f"    ✅ High correlation: {dest_type} embeddings ENCODE assignment group structure.")
+                elif paired_arr.mean() > 0.2:
+                    lines.append(f"    ⚠️  Moderate correlation: partial alignment between {dest_type} and assignment embeddings.")
+                else:
+                    lines.append(f"    ❌ Low correlation: {dest_type} embeddings don't align with assignment groupings.")
+
+    return "\n".join(lines)
+
+
+# -------------------------
+# load checkpoint and build model
+# -------------------------
+def load_model_from_ckpt(ckpt_path: str, data: HeteroData, in_dims: Dict[str, int], device: torch.device):
+    """Load a model from a checkpoint file, auto-detecting model type."""
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    ckpt_args = payload.get("args", {})
+    
+    target = ckpt_args.get("target", "assignments")
+    hidden = int(ckpt_args.get("hidden", 64))
+    layers = int(ckpt_args.get("layers", 2))
+    arch = ckpt_args.get("arch", "sage")
+    
+    if arch == "rgcn" or "rgcn" in Path(ckpt_path).name.lower():
+        # Load the original HeteroGCN with the original weights
+        model = HeteroGCN(data.metadata(), hidden, hidden)
+        model.load_state_dict(payload["model_state"], strict=False)
+        model_name = "RGCN"
+    else:
+        model = HeteroSAGERegressor(
+            metadata=data.metadata(), in_dims=in_dims,
+            hidden_dim=hidden, num_layers=layers, target_node_type=target,
+        )
+        model.load_state_dict(payload["model_state"], strict=False)
+        model_name = "GraphSAGE"
+    
+    model = model.to(device)
+    model.eval()
+    
+    return model, model_name, payload, ckpt_args
+
+
+# -------------------------
+# model comparison (from checkpoints only)
+# -------------------------
+def compare_models_from_ckpts(
+    data: HeteroData,
+    in_dims: Dict[str, int],
+    target: str,
+    train_idx: torch.Tensor,
+    val_idx: torch.Tensor,
+    test_idx: torch.Tensor,
+    device: torch.device,
+    sage_ckpt_path: str,
+    rgcn_ckpt_path: str,
+    batch_size: int = 256,
+    num_neighbors: int = 3,
+    layers: int = 2,
+    splits: List[str] = None,
+):
+    """Compare pre-trained GraphSAGE and RGCN models from checkpoints."""
+    if splits is None:
+        splits = ["train", "val", "test", "all"]
+
+    lines = []
+    lines.append("=" * 80)
+    lines.append("Model Comparison: GraphSAGE vs RGCN (from checkpoints)")
+    lines.append(f"  Splits evaluated: {', '.join(splits)}")
+    lines.append("=" * 80)
+
+    num_neighbors_dict = {et: [num_neighbors] * layers for et in data.edge_types}
+    
+    # Build loaders only for requested splits
+    loaders = {}
+    if "train" in splits:
+        loaders["train"] = NeighborLoader(
+            data, input_nodes=(target, train_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "val" in splits:
+        loaders["val"] = NeighborLoader(
+            data, input_nodes=(target, val_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "test" in splits:
+        loaders["test"] = NeighborLoader(
+            data, input_nodes=(target, test_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+    if "all" in splits:
+        all_idx = torch.arange(data[target].num_nodes)
+        loaders["all"] = NeighborLoader(
+            data, input_nodes=(target, all_idx),
+            num_neighbors=num_neighbors_dict, batch_size=batch_size, shuffle=False,
+        )
+
+    results = {}
+    models = {}
+
+    # --- GraphSAGE ---
+    lines.append(f"\n[GraphSAGE] Loading checkpoint: {sage_ckpt_path}")
+    sage_model, sage_name, sage_payload, ckpt_args = load_model_from_ckpt(sage_ckpt_path, data, in_dims, device)
+    sage_epoch = sage_payload.get("epoch", "?")
+    lines.append(f"  Checkpoint epoch: {sage_epoch}")
+    
+    target = ckpt_args.get("target", "assignments")
+    seed = int(ckpt_args.get("seed", 42))
+    train_ratio = float(ckpt_args.get("train_ratio", 0.8))
+    val_ratio = float(ckpt_args.get("val_ratio", 0.1))
+    min_degree = int(ckpt_args.get("min_degree", 1))
+    degree_mode = ckpt_args.get("degree_mode", "in")
+    layers = int(ckpt_args.get("layers", 2))
+
+    print(f"[info] config from checkpoint: target={target}, seed={seed}, "
+          f"train_ratio={train_ratio}, val_ratio={val_ratio}, "
+          f"min_degree={min_degree}, degree_mode={degree_mode}, layers={layers}")
+
+    results["sage"] = {}
+    for split in splits:
+        results["sage"][split] = eval_model(sage_model, loaders[split], target, device)
+        r = results["sage"][split]
+        lines.append(f"  {split.capitalize():>5}: RMSE={r['rmse']:.4f}, MAE={r['mae']:.4f}, SmoothL1={r['smoothl1']:.4f}")
+    models["sage"] = sage_model
+
+    # --- RGCN ---
+    lines.append(f"\n[RGCN] Loading checkpoint: {rgcn_ckpt_path}")
+    rgcn_model, rgcn_name, rgcn_payload, _ = load_model_from_ckpt(rgcn_ckpt_path, data, in_dims, device)
+    rgcn_epoch = rgcn_payload.get("epoch", "?")
+    lines.append(f"  Checkpoint epoch: {rgcn_epoch}")
+    
+    results["rgcn"] = {}
+    for split in splits:
+        results["rgcn"][split] = eval_model(rgcn_model, loaders[split], target, device)
+        r = results["rgcn"][split]
+        lines.append(f"  {split.capitalize():>5}: RMSE={r['rmse']:.4f}, MAE={r['mae']:.4f}, SmoothL1={r['smoothl1']:.4f}")
+    models["rgcn"] = rgcn_model
+
+    # --- Comparison Table ---
+    lines.append("\n" + "-" * 100)
+    lines.append("Comparison Summary")
+    lines.append("-" * 100)
+    header = f"{'Metric':<12}"
+    for split in splits:
+        header += f" {'SAGE '+split:>12} {'RGCN '+split:>12}"
+    lines.append(header)
+    lines.append("-" * 100)
+    for m in ["rmse", "mae", "smoothl1"]:
+        row = f"{m:<12}"
+        for split in splits:
+            row += f" {results['sage'][split][m]:>12.4f} {results['rgcn'][split][m]:>12.4f}"
+        lines.append(row)
+    
+    # --- Winner per metric ---
+    lines.append("\n" + "-" * 60)
+    lines.append("Winner (lower is better)")
+    lines.append("-" * 60)
+    for split in splits:
+        for m in ["rmse", "mae", "smoothl1"]:
+            s = results["sage"][split][m]
+            r = results["rgcn"][split][m]
+            winner = "GraphSAGE" if s < r else "RGCN" if r < s else "Tie"
+            diff = abs(s - r)
+            pct = diff / max(min(s, r), 1e-8) * 100
+            lines.append(f"  {split:>5} {m:<12}: {winner:<12} (diff={diff:.4f}, {pct:.2f}%)")
+
+    return "\n".join(lines), models["sage"], models["rgcn"], results
+
+
+# -------------------------
+# main
+# -------------------------
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--pt", type=str, required=True, help="Path to graph .pt")
+    ap.add_argument("--sage_ckpt", type=str, default="runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt",
+                     help="Path to GraphSAGE checkpoint")
+    ap.add_argument("--rgcn_ckpt", type=str, default="runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt",
+                     help="Path to RGCN checkpoint")
+    ap.add_argument("--device", type=str, default="auto")
+    ap.add_argument("--batch_size", type=int, default=256)
+    ap.add_argument("--num_neighbors", type=int, default=3)
+    ap.add_argument("--out", type=str, default="runs/analysis/embedding_analysis.txt")
+    ap.add_argument("--splits", nargs="+", default=["train", "val", "test", "all"],
+                     choices=["train", "val", "test", "all"],
+                     help="Which splits to evaluate (default: train val test all)")
+    ap.add_argument("--skip_eval", action="store_true",
+                     help="Skip model evaluation and only perform embedding analysis")
+    ap.add_argument("--demo", action="store_true",
+                     help="Run in demo mode with a tiny graph subset to verify the pipeline end-to-end")
+    ap.add_argument("--demo_nodes", type=int, default=10000,
+                     help="Number of target nodes to keep in demo mode (default: 500000)")
+    args = ap.parse_args()
+
+    device = pick_device(args.device)
+    print(f"[info] device={device}")
+
+    # Override settings for demo mode
+    if args.demo:
+        print("[demo] Running in demo mode with reduced graph size")
+        args.batch_size = min(args.batch_size, 64)
+        args.num_neighbors = min(args.num_neighbors, 2)
+
+    # Peek into the sage checkpoint to get training config
+    sage_payload = torch.load(args.sage_ckpt, map_location="cpu", weights_only=False)
+    ckpt_args = sage_payload.get("args", {})
+
+    target = ckpt_args.get("target", "assignments")
+    seed = int(ckpt_args.get("seed", 42))
+    train_ratio = float(ckpt_args.get("train_ratio", 0.8))
+    val_ratio = float(ckpt_args.get("val_ratio", 0.1))
+    min_degree = int(ckpt_args.get("min_degree", 1))
+    degree_mode = ckpt_args.get("degree_mode", "in")
+    layers = int(ckpt_args.get("layers", 2))
+
+    print(f"[info] config from checkpoint: target={target}, seed={seed}, "
+          f"train_ratio={train_ratio}, val_ratio={val_ratio}, "
+          f"min_degree={min_degree}, degree_mode={degree_mode}, layers={layers}")
+
+    # Load data
+    data: HeteroData = torch.load(args.pt, map_location="cpu", weights_only=False)
+    assert isinstance(data, HeteroData)
+    data[target].y = data[target].y.float()
+
+    # Subsample in demo mode
+    if args.demo:
+        data = subsample_hetero_graph(data, target, max_target_nodes=args.demo_nodes, seed=seed)
+
+    # Degree filter and split (using checkpoint config)
+    deg = compute_target_degree(data, target, degree_mode=degree_mode)
+    kept = (deg >= min_degree).nonzero(as_tuple=False).view(-1)
+    train_idx, val_idx, test_idx = split_indices(
+        kept, seed=seed, train_ratio=train_ratio, val_ratio=val_ratio,
+    )
+
+    # Normalize and sanitize
+    normalize_node_features_inplace(data, drop_const=True)
+    in_dims = ensure_all_node_types_have_x(data)
+    data = sanitize_for_neighbor_loader(data)
+
+    report_lines = []
+
+    if args.skip_eval:
+        # Load models without evaluation
+        print("\n[info] Skipping evaluation, loading models for embedding extraction only...")
+        sage_model, _, _, _ = load_model_from_ckpt(args.sage_ckpt, data, in_dims, device)
+        rgcn_model, _, _, _ = load_model_from_ckpt(args.rgcn_ckpt, data, in_dims, device)
+    else:
+        # 1. Compare models from checkpoints (no retraining)
+        comparison_report, sage_model, rgcn_model, results = compare_models_from_ckpts(
+            data, in_dims, target, train_idx, val_idx, test_idx, device,
+            sage_ckpt_path=args.sage_ckpt,
+            rgcn_ckpt_path=args.rgcn_ckpt,
+            batch_size=args.batch_size,
+            num_neighbors=args.num_neighbors,
+            layers=layers,
+            splits=args.splits,
+        )
+        report_lines.append(comparison_report)
+
+    # 2. Extract embeddings from both models
+    print("\n[info] Extracting GraphSAGE embeddings...")
+    sage_emb = extract_embeddings(
+        sage_model, data, device, target,
+        num_neighbors=args.num_neighbors, layers=layers, batch_size=args.batch_size,
+    )
+
+    print("[info] Extracting RGCN embeddings...")
+    rgcn_emb = extract_embeddings(
+        rgcn_model, data, device, target,
+        num_neighbors=args.num_neighbors, layers=layers, batch_size=args.batch_size,
+    )
+
+    # 3. Analyze district/department embeddings for both models
+    report_lines.append("\n\n--- GraphSAGE Embeddings ---")
+    report_lines.append(analyze_district_department_embeddings(sage_emb, data))
+    # report_lines.append(analyze_district_department_combinations(sage_emb, data, target))
+    report_lines.append(analyze_assignment_district_department_relationship(sage_emb, data, target))
+
+    report_lines.append("\n\n--- RGCN Embeddings ---")
+    report_lines.append(analyze_district_department_embeddings(rgcn_emb, data))
+    # report_lines.append(analyze_district_department_combinations(rgcn_emb, data, target))
+    report_lines.append(analyze_assignment_district_department_relationship(rgcn_emb, data, target))
+
+    # Save report
+    report = "\n".join(report_lines)
+    print(report)
+
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(report, encoding="utf-8")
+    print(f"\n[written] {out_path}")
+
+
+if __name__ == "__main__":
+    # --skip_eval: just load models and analyze embeddings without running evaluation
+    # --demo: run the full pipeline on a small subsampled graph
+    # --split: specify which splits to evaluate (default: train val test all)
+
+    # Demo mode to ensure smooth run through:
+    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --skip_eval --demo
+
+    # Full evaluation and analysis run through 
+    # python -m src.runner.analyze_embeddings --pt data/graph/sdge.pt --sage_ckpt runs/checkpoints/kfold-sage-fold00_fold00_epoch002.pt --rgcn_ckpt runs/checkpoints/kfold-rgcn-fold00_fold00_epoch002.pt --out runs/analysis/embedding_analysis.txt --split eval test
+    main()

@@ -8,11 +8,4 @@ fastapi
 pyyaml
 pydantic
 pyarrow
-
-# PCA / viz (for src.runner.pca_weights)
-scikit-learn
-matplotlib
-plotly
-
-# Baselines (for src.runner.lightgbm_baseline)
-lightgbm
+wandb

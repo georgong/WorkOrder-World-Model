@@ -1,31 +1,20 @@
-from torch_geometric.nn import HeteroConv, GCNConv
+"""
+Model builder utility — constructs the HeteroSAGERegressor
+with the same architecture used during training.
+"""
+from __future__ import annotations
+
+from typing import Dict
+
 import torch
-from torch_geometric.data import HeteroData
-from torch_geometric.nn import HeteroConv, SAGEConv, Linear
 import torch.nn as nn
 import torch.nn.functional as F
+from torch_geometric.nn import HeteroConv, SAGEConv, Linear
 
-class HeteroGCN(torch.nn.Module):
-    def __init__(self, metadata, hidden, out_dim):
-        super().__init__()
-
-        self.conv1 = HeteroConv({
-            edge_type: GCNConv(-1, hidden)
-            for edge_type in metadata[1]
-        }, aggr="sum")
-
-        self.conv2 = HeteroConv({
-            edge_type: GCNConv(hidden, out_dim)
-            for edge_type in metadata[1]
-        }, aggr="sum")
-
-    def forward(self, data):
-        x_dict = self.conv1(data.x_dict, data.edge_index_dict)
-        x_dict = {k: v.relu() for k, v in x_dict.items()}
-        x_dict = self.conv2(x_dict, data.edge_index_dict)
-        return x_dict
 
 class HeteroSAGERegressor(nn.Module):
+    """Heterogeneous GraphSAGE regressor (mirrors src/model/gnn.py)."""
+
     def __init__(self, metadata, in_dims, hidden_dim=128, num_layers=2, target_node_type="assignments"):
         super().__init__()
         self.node_types, self.edge_types = metadata
@@ -43,7 +32,7 @@ class HeteroSAGERegressor(nn.Module):
         self.base = nn.Parameter(torch.tensor(0.0))
         self.out = Linear(hidden_dim, 1)
 
-    def forward(self, data: HeteroData):
+    def forward(self, data):
         x_dict = {nt: F.relu(self.in_proj[nt](data[nt].x)) for nt in self.node_types}
 
         for i, conv in enumerate(self.convs):
@@ -53,3 +42,20 @@ class HeteroSAGERegressor(nn.Module):
         delta = self.out(x_dict[self.target_node_type]).squeeze(-1)
         pred = self.base + delta
         return {"pred": pred}
+
+
+def build_model(
+    metadata,
+    in_dims: Dict[str, int],
+    hidden_dim: int = 64,
+    num_layers: int = 2,
+    target: str = "assignments",
+) -> HeteroSAGERegressor:
+    """Build a HeteroSAGERegressor model."""
+    return HeteroSAGERegressor(
+        metadata=metadata,
+        in_dims=in_dims,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        target_node_type=target,
+    )

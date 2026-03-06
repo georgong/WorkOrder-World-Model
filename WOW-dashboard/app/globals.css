@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-primary: #2563eb;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+  --color-success: #10b981;
+  --foreground-rgb: 0, 0, 0;
+  --background-rgb: 248, 250, 252;
+  --base-font-size: 13px;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: white;
+  min-height: 100vh;
+  font-size: var(--base-font-size);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Modern Card */
+.metric-card {
+  @apply rounded-lg bg-white p-2 shadow-[0_2px_8px_rgba(0,0,0,0.04)] border border-slate-100 transition-all hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)];
+}
+
+/* Sidebar Link Active State */
+.sidebar-link-active {
+  @apply bg-brand-blue text-white shadow-md;
+}
+
+.sidebar-link-inactive {
+  @apply text-slate-500 hover:bg-slate-50 hover:text-brand-blue;
+}
