@@ -174,30 +174,35 @@ The world model is represented as a PyTorch Geometric `HeteroData` object.
 ```bash
 bash scripts/generate_graph.sh
 ```
+**Expected output:** `data/graph/sdge.pt` — a serialized PyTorch Geometric `HeteroData` object containing all node types, edge types, and their respective feature tensors.
+
 ### Graph Statistic Analysis
 
 #### connectivity
 ```
 bash scripts/graph_eda.sh
 ```
-EDA result will put into data/analysis
+**Expected output:** `data/analysis/connectivity.count.csv` and `data/analysis/connectivity.ratio.csv`.
 
 ### Graph Visualize
 ```
 bash scripts/visualize_graph.sh
 ```
+**Expected output:** An interactive HTML visualization of the heterogeneous graph opened in the browser via the local server.
 
 ### Training
 ```
 bash scripts/prune_graph.sh
 bash scripts/train_gnn.sh
 ```
+**Expected output:** `data/graph/sdge_pruned.pt` — pruned graph with low-degree nodes removed; `runs/checkpoints/` — saved model checkpoints; training metrics (loss, MAE) logged to W&B.
 
 ### Prediction Interpertation(after training)
 ```
 python -m src.runner.interpret_subgraph
 bash scripts/visualize_interpretation.sh
 ```
+**Expected output:** `runs/interpret/` — per-assignment subgraph JSONs with feature attribution scores; an interactive HTML visualization of interpretation results served via the local interpret server.
 
 ## Model Application
 
