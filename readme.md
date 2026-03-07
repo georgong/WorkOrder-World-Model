@@ -85,6 +85,8 @@ This YAML defines, **for each dataset and each variable**:
 
 ## Data Processing
 
+The raw data is exported from SDG&E CLICK system that contains historical scheduling activity records. Data is classified in compliance with SDG&E data privacy.
+
 Place raw data files under:
 
 ```
