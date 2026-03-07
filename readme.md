@@ -3,7 +3,11 @@
 
 A structured world model for work order systems.
 
-This project constructs a heterogeneous graph from tabular work-order data (tasks, assignments, engineers, districts, etc.) to support prediction, simulation, and reasoning tasks. The core goal is to make data semantics explicit, prevent information leakage, and ensure reproducibility when building graph-based models.
+## Problem Description
+
+Utility companies like SDG&E coordinates thousands of field tasks across technicians, districts, and time constraints, making daily scheduling a complex system-level problem. However, existing scheduling tools primarily focus on generating feasible plans and provide limited visibility into systemic risks such as workload imbalance, task delays, and regional congestion. 
+
+This project develops a graph-based modeling pipeline that analyzes historical schedules to uncover operational patterns and provide actionable insights into scheduling performance.
 
 ## Setup / Deployment
 
@@ -199,6 +203,13 @@ bash scripts/visualize_interpretation.sh
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
 
+---
+
+## TODO
+
+- [ ] Extend the model prediction pipeline to support configurable target selection, allowing the model to dynamically predict different metrics
+- [ ] Enrich the web-based dashboard with additional metrics and visualizations to provide deeper insight into schedule risk, engineer workload, and district-level patterns
+- [ ] Expand model interpretation and post-hoc analysis to better understand the structural relationships driving predictions, including feature attribution across node types and subgraph-level explanations of scheduling dynamics
 
 ## Project Structure
 
