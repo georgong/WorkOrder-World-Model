@@ -331,6 +331,8 @@ def run_one_fold_lightgbm(
     in_dims: Dict[str, int],
     num_neighbors: Dict[Tuple[str, str, str], List[int]],
     use_wandb: bool = True,
+    out_dir: Optional[Path] = None,
+    seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     train_loader = NeighborLoader(
         base_data,
@@ -439,6 +441,12 @@ def run_one_fold_lightgbm(
         )
         wandb.finish()
 
+    if out_dir is not None and seed is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"seed{seed}_fold{fold:02d}"
+        model_path = out_dir / f"{prefix}.txt"
+        model.save_model(str(model_path))
+
     return {
         "fold": fold,
         "model": "lightgbm",
@@ -537,6 +545,7 @@ def main():
     if seed_list is None:
         seed_list = torch.tensor([args.seed], dtype=torch.long)
 
+    out_dir = Path("checkpoints") / (args.wandb_run_name or "kfold") / "lightgbm"
     all_summaries: List[Dict[str, Any]] = []
     for si, seed in enumerate(seed_list.tolist()):
         torch.manual_seed(int(seed))
@@ -560,6 +569,8 @@ def main():
                     in_dims=in_dims,
                     num_neighbors=num_neighbors,
                     use_wandb=not args.no_wandb,
+                    out_dir=out_dir,
+                    seed=int(seed),
                 )
                 summary["seed"] = int(seed)
                 all_summaries.append(summary)
@@ -579,11 +590,12 @@ def main():
                 in_dims=in_dims,
                 num_neighbors=num_neighbors,
                 use_wandb=not args.no_wandb,
+                out_dir=out_dir,
+                seed=int(seed),
             )
             summary["seed"] = int(seed)
             all_summaries.append(summary)
 
-    out_dir = Path("checkpoints") / (args.wandb_run_name or "kfold") / "lightgbm"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "kfold_summary.json"
     out_path.write_text(json.dumps(all_summaries, indent=2))
