@@ -3,7 +3,11 @@
 
 A structured world model for work order systems.
 
-This project constructs a heterogeneous graph from tabular work-order data (tasks, assignments, engineers, districts, etc.) to support prediction, simulation, and reasoning tasks. The core goal is to make data semantics explicit, prevent information leakage, and ensure reproducibility when building graph-based models.
+## Problem Description
+
+Utility companies like SDG&E coordinates thousands of field tasks across technicians, districts, and time constraints, making daily scheduling a complex system-level problem. However, existing scheduling tools primarily focus on generating feasible plans and provide limited visibility into systemic risks such as workload imbalance, task delays, and regional congestion. 
+
+This project develops a graph-based modeling pipeline that analyzes historical schedules to uncover operational patterns and provide actionable insights into scheduling performance.
 
 ## Setup / Deployment
 
@@ -80,6 +84,8 @@ This YAML defines, **for each dataset and each variable**:
 ---
 
 ## Data Processing
+
+The raw data is exported from SDG&E CLICK system that contains historical scheduling activity records. Data is classified in compliance with SDG&E data privacy.
 
 Place raw data files under:
 
@@ -170,30 +176,35 @@ The world model is represented as a PyTorch Geometric `HeteroData` object.
 ```bash
 bash scripts/generate_graph.sh
 ```
+**Expected output:** `data/graph/sdge.pt` — a serialized PyTorch Geometric `HeteroData` object containing all node types, edge types, and their respective feature tensors.
+
 ### Graph Statistic Analysis
 
 #### connectivity
 ```
 bash scripts/graph_eda.sh
 ```
-EDA result will put into data/analysis
+**Expected output:** `data/analysis/connectivity.count.csv` and `data/analysis/connectivity.ratio.csv`.
 
 ### Graph Visualize
 ```
 bash scripts/visualize_graph.sh
 ```
+**Expected output:** An interactive HTML visualization of the heterogeneous graph opened in the browser via the local server.
 
 ### Training
 ```
 bash scripts/prune_graph.sh
 bash scripts/train_gnn.sh
 ```
+**Expected output:** `data/graph/sdge_pruned.pt` — pruned graph with low-degree nodes removed; `runs/checkpoints/` — saved model checkpoints; training metrics (loss, MAE) logged to W&B.
 
 ### Prediction Interpertation(after training)
 ```
 python -m src.runner.interpret_subgraph
 bash scripts/visualize_interpretation.sh
 ```
+**Expected output:** `runs/interpret/` — per-assignment subgraph JSONs with feature attribution scores; an interactive HTML visualization of interpretation results served via the local interpret server.
 
 ### Hidden-layer PCA by neighbor group (task type / engineer / districts / departments)
 After training, run PCA on checkpoint hidden activations over the dataset, grouped by neighbor-derived labels (e.g. engineer, task type, districts, departments):
@@ -211,6 +222,13 @@ Generates `runs/pca_weights/pca_interactive.html`. Use the dropdown to switch la
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
 
+---
+
+## TODO
+
+- [ ] Extend the model prediction pipeline to support configurable target selection, allowing the model to dynamically predict different metrics
+- [ ] Enrich the web-based dashboard with additional metrics and visualizations to provide deeper insight into schedule risk, engineer workload, and district-level patterns
+- [ ] Expand model interpretation and post-hoc analysis to better understand the structural relationships driving predictions, including feature attribution across node types and subgraph-level explanations of scheduling dynamics
 
 ## Project Structure
 

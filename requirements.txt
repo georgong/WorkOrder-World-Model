@@ -1,11 +1,19 @@
 # Core numerical
-# pip3 install torch torchvision
-numpy==1.26.4
-pandas==2.2.2
+# Note: install PyTorch separately to match your hardware (CPU / CUDA / MPS):
+#   pip3 install torch torchvision
+torch==2.7.1
+torch-geometric==2.5.3
+numpy==2.4.1
+pandas==2.3.3
 polars==1.35.1
-uvicorn==0.37.0
-fastapi
-pyyaml
-pydantic
-pyarrow
-wandb
+pyarrow==22.0.0
+
+# API / serving
+fastapi==0.128.0
+uvicorn==0.40.0
+pydantic==2.12.5
+
+# Utilities
+pyyaml==6.0.3
+tqdm==4.67.1
+wandb==0.24.1
