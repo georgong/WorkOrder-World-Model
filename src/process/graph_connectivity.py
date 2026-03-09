@@ -9,7 +9,7 @@ import torch
 try:
     import pandas as pd
 except ImportError:
-    pd = None  # 你不装 pandas 也能跑，只是 heatmap 用 dict 返回
+    pd = None 
 
 
 @dataclass(frozen=True)
@@ -265,6 +265,5 @@ res = analyze_graph_connectivity(
     save_csv="data/analysis/connectivity"
 )
 
-# 如果装了 pandas：
 print(res["heatmap_ratio_df"].round(4))
 print(res["metapath_results"])

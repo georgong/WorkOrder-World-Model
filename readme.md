@@ -92,77 +92,7 @@ Place raw data files under:
 ```
 data/raw/
 ```
-which should contains csv files named and formated like this:
-#### Assignments
-
-- W6ASSIGNMENTS-0.csv
-- W6ASSIGNMENTS-1.csv
-- W6ASSIGNMENTS-2.csv
-- W6ASSIGNMENTS-3.csv
-- ...
-- W6ASSIGNMENTS-{+d}.csv
-
-
-#### Tasks
-
-- W6TASKS-0.csv
-- W6TASKS-1.csv
-- W6TASKS-2.csv
-- W6TASKS-3.csv
-- ...
-- W6TASKS-{+d}.csv
-
-
-#### Engineers
-
-- W6ENGINEERS-0.csv
-- ...
-- W6ENGINEERS-{+d}.csv
-
-
-#### Districts
-
-- W6DISTRICTS-0.csv
-- ...
-- W6DISTRICTS-{+d}.csv
-
-
-#### Regions
-
-- W6REGIONS-0.csv
-- ...
-- W6REGIONS-{+d}.csv
-
-
-#### Departments
-
-- W6DEPARTMENT-0.csv
-- ...
-- W6DEPARTMENT-{+d}.csv
-
-
-#### Equipment
-
-- W6EQUIPMENT-0.csv
-- W6EQUIPMENT-1.csv
-- ...
-- W6EQUIPMENT-{+d}.csv
-
-
-#### Task Statuses
-
-- W6TASK_STATUSES-0.csv
-- ...
-- W6TASK_STATUSES-{+d}.csv
-
-
-#### Task Types
-
-- W6TASK_TYPES-0.csv
-- ...
-- W6TASK_TYPES-{+d}.csv
-
-
+which should contains csv files such as W6ASSIGNMENTS-0.csv, W6TASKS-0.csv, W6ENGINEERS-0.csv, etc.
 
 
 ---
@@ -206,6 +136,18 @@ bash scripts/visualize_interpretation.sh
 ```
 **Expected output:** `runs/interpret/` — per-assignment subgraph JSONs with feature attribution scores; an interactive HTML visualization of interpretation results served via the local interpret server.
 
+### Hidden-layer PCA by neighbor group (task type / engineer / districts / departments)
+After training, run PCA on checkpoint hidden activations over the dataset, grouped by neighbor-derived labels (e.g. engineer, task type, districts, departments):
+```
+python -m src.runner.pca_weights --pt path/to/graph.pt --ckpt path/to/checkpoint.pt [--split val] [--max_samples 5000] [--out_dir runs/pca_weights]
+```
+Output: `runs/pca_weights/pca_*_by_*.png` and `pca_summary.json`.
+
+**Interactive Plotly (single HTML with dropdown):**
+```
+python -m src.runner.pca_weights --pt path/to/graph.pt --ckpt path/to/checkpoint.pt --plotly [--open]
+```
+Generates `runs/pca_weights/pca_interactive.html`. Use the dropdown to switch layer × group (engineers, task_types, districts, etc.). `--open` opens it in your default browser.
 ## Model Application
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
@@ -244,58 +186,9 @@ See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/RE
 │   │   └── tasks_processed.parquet
 │   └── raw
 │       ├── W6ASSIGNMENTS-0.csv
-│       ├── W6ASSIGNMENTS-1.csv
-│       ├── W6ASSIGNMENTS-10.csv
-│       ├── W6ASSIGNMENTS-11.csv
-│       ├── W6ASSIGNMENTS-12.csv
-│       ├── W6ASSIGNMENTS-13.csv
-│       ├── W6ASSIGNMENTS-14.csv
-│       ├── W6ASSIGNMENTS-15.csv
-│       ├── W6ASSIGNMENTS-16.csv
-│       ├── W6ASSIGNMENTS-17.csv
-│       ├── W6ASSIGNMENTS-18.csv
-│       ├── W6ASSIGNMENTS-19.csv
-│       ├── W6ASSIGNMENTS-2.csv
-│       ├── W6ASSIGNMENTS-20.csv
-│       ├── W6ASSIGNMENTS-21.csv
-│       ├── W6ASSIGNMENTS-22.csv
-│       ├── W6ASSIGNMENTS-3.csv
-│       ├── W6ASSIGNMENTS-4.csv
-│       ├── W6ASSIGNMENTS-5.csv
-│       ├── W6ASSIGNMENTS-6.csv
-│       ├── W6ASSIGNMENTS-7.csv
-│       ├── W6ASSIGNMENTS-8.csv
-│       ├── W6ASSIGNMENTS-9.csv
-│       ├── W6DEPARTMENT-0.csv
-│       ├── W6DISTRICTS-0.csv
 │       ├── W6ENGINEERS-0.csv
-│       ├── W6EQUIPMENT-0.csv
-│       ├── W6EQUIPMENT-1.csv
-│       ├── W6REGIONS-0.csv
 │       ├── W6TASKS-0.csv
-│       ├── W6TASKS-1.csv
-│       ├── W6TASKS-10.csv
-│       ├── W6TASKS-11.csv
-│       ├── W6TASKS-12.csv
-│       ├── W6TASKS-13.csv
-│       ├── W6TASKS-14.csv
-│       ├── W6TASKS-15.csv
-│       ├── W6TASKS-16.csv
-│       ├── W6TASKS-17.csv
-│       ├── W6TASKS-18.csv
-│       ├── W6TASKS-19.csv
-│       ├── W6TASKS-2.csv
-│       ├── W6TASKS-20.csv
-│       ├── W6TASKS-21.csv
-│       ├── W6TASKS-3.csv
-│       ├── W6TASKS-4.csv
-│       ├── W6TASKS-5.csv
-│       ├── W6TASKS-6.csv
-│       ├── W6TASKS-7.csv
-│       ├── W6TASKS-8.csv
-│       ├── W6TASKS-9.csv
-│       ├── W6TASK_STATUSES-0.csv
-│       └── W6TASK_TYPES-0.csv
+│       └── ...
 ├── dockerfile
 ├── docs
 │   └── data_schema.md

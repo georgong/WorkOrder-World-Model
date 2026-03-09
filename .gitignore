@@ -11,7 +11,10 @@ data/*
 *.swp
 *.swo
 wandb/*
-runs/
+wandb/
+runs/** 
+!runs/analysis_model/
+!runs/analysis_model/**
 ########################
 # Python
 ########################
