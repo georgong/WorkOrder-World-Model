@@ -169,12 +169,6 @@ bash scripts/analysis_model.sh
 ```
 **Expected output:** `runs/compare_model/compare_three.png`, `runs/compare_model/predictions.json`, and figures under `runs/analysis_model/` (prediction vs truth, hard-case analysis, metrics bar plot).
 
-### K-fold training (experiments)
-```bash
-bash scripts/train_kfold.sh
-```
-Runs `src.runner.train_kfold` with the default RGNN configuration; edit the script to change model type, fold count, or seeds.
-
 ## Model Application
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
