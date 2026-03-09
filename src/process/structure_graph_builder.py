@@ -59,7 +59,7 @@ preprocessing_dict = {
     "assignments": {"func": process_assignment_feature, "schema": assignment_schema},
     "districts": {"func": process_districts_feature, "schema": district_schema},
     "engineers": {"func": process_engineer_feature, "schema": engineer_schema},
-    # departments / task_types / task_statuses / equipment / regions 目前没给 func，就先用“原始数值列”兜底
+    # departments / task_types / task_statuses / equipment / regions
 }
 
 # This is used in _build_edges_by_shared_edge_trait() to avoid memory explosion for very large groups
@@ -118,7 +118,7 @@ def get_trait_cols(schema: Dict[str, Any], table_name: str) -> Tuple[List[str], 
             node_cols.append(col)
         elif (info or {}).get("trait_type") == "edge":
             edge_cols.append(col)
-    # 去重保持顺序
+
     node_cols = list(dict.fromkeys(node_cols))
     edge_cols = list(dict.fromkeys(edge_cols))
     return node_cols, edge_cols
@@ -382,7 +382,7 @@ def project_metapath_edges(
     rel1: tuple[str, str, str],  # (src, r1, mid1)
     rel2: tuple[str, str, str],  # (mid1, r2, mid2)
     rel3: tuple[str, str, str],  # (mid2, r3, dst)
-    min_count: int = 1,          # 出现次数阈值，可选
+    min_count: int = 1,          
 ) -> torch.Tensor:
     """
     Project rel1 ∘ rel2 ∘ rel3 into a direct edge_index from src -> dst
@@ -416,7 +416,7 @@ def project_metapath_edges(
     A3 = SparseTensor(row=ei3[0], col=ei3[1], sparse_sizes=(n_mid2, n_dst))
 
     P = (A1 @ A2) @ A3  # sparse matmul
-    row, col, val = P.coo()  # val = 路径数（加和）
+    row, col, val = P.coo()  # val = # of path
 
     if min_count > 1:
         keep = val >= min_count
@@ -513,14 +513,10 @@ class GraphBuilder:
     def _build_engineer_task_type_edges_from_graph(self) -> None:
         # engineers <-> task_types
 
-        # 你得把这三个 rel 改成你自己图里真实存在的 edge_types
-        # 最稳的办法：print(self.data.edge_types) 看一眼再填
         rel_ea = ("engineers", "relates_to", "assignments")
         rel_at = ("assignments", "relates_to", "tasks")
         rel_tt = ("tasks", "relates_to", "task_types")
 
-        # 如果你实际是反向边，比如 ("assignments","rev_relates_to","engineers")
-        # 就换成你想要的方向，或者直接用 flip(0)
 
         for rel in [rel_ea, rel_at, rel_tt]:
             assert rel in self.data.edge_types, f"Missing edge type {rel}. Existing: {self.data.edge_types}"
@@ -530,7 +526,7 @@ class GraphBuilder:
             rel1=rel_ea,
             rel2=rel_at,
             rel3=rel_tt,
-            min_count=1,   # 你也可以设成 2/3，过滤掉“只出现一次”的弱关联
+            min_count=1,   # filter path that only occurs once
         )
 
         rel = ("engineers", "works_on_type", "task_types")
@@ -644,17 +640,16 @@ class GraphBuilder:
             vars_cfg = self.yaml["datasets"][node_type]["variables"]
             key_cols = [c for c, info in vars_cfg.items() if bool((info or {}).get("key", False))]
 
-            # 只在原 df 中的 numeric
+            # only keep numeric in original df 
             numeric_cols = [
                 c for c in node_cols
                 if c in df.columns and df.schema[c] in (pl.Int64, pl.Float64)
             ]
 
-            # 去掉 key 列
+            # remove key col
             numeric_feat_cols = [c for c in numeric_cols if c not in key_cols]
 
             if not numeric_feat_cols:
-                # 全是 key，或者根本没有数值特征
                 feat_obj = pl.DataFrame({"__dummy__": pl.Series([1.0] * df.height)})
             else:
                 feat_obj = df.select(numeric_feat_cols).fill_null(0)
@@ -698,22 +693,20 @@ class GraphBuilder:
         if target_col in attr_name:
             k = attr_name.index(target_col)
 
-            # 1. 拿出来当 y
+            # 1. keep y
             y = X[:, k].clone()
 
-            # 2. 从 x 里删除这一列
+            # 2. delete from X
             X_new = torch.cat([X[:, :k], X[:, k+1:]], dim=1)
 
-            # 3. 更新 attr_name
+            # 3. update attr_name
             new_attr_name = attr_name[:k] + attr_name[k+1:]
 
-            # 4. 写回
             self.data[node_type].x = X_new
             self.data[node_type].y = y
             self.data[node_type].attr_name = new_attr_name
 
         else:
-            # 没有 target，就正常塞 x
             self.data[node_type].x = X
 
         # 5) store masks (which columns are hidden at prediction time) as metadata lists
@@ -758,18 +751,10 @@ class GraphBuilder:
                 rel = (src_type, edge_type, dst_type)
                 rev_rel = (dst_type, f"rev_{edge_type}", src_type)
 
-                # -------------------------
-                # 1) 如果这个 rel 已经有边了，直接跳过
-                # -------------------------
                 ei_existing = getattr(self.data[rel], "edge_index", None)
                 if isinstance(ei_existing, torch.Tensor) and ei_existing.numel() > 0 and ei_existing.size(1) > 0:
                     continue
 
-                # -------------------------
-                # 2) 如果这个 rel 实际上已经被“自动 reverse”覆盖了，也跳过
-                #    规则：如果 rel 的 edge_type 形如 rev_X，
-                #    且 forward (dst, X, src) 已经存在且非空，那么 rel 就别再建
-                # -------------------------
                 if isinstance(edge_type, str) and edge_type.startswith("rev_"):
                     base = edge_type[len("rev_"):]
                     forward = (dst_type, base, src_type)  # reverse-of-forward
@@ -778,9 +763,6 @@ class GraphBuilder:
                         if isinstance(ei_fwd, torch.Tensor) and ei_fwd.numel() > 0 and ei_fwd.size(1) > 0:
                             continue
 
-                # -------------------------
-                # 3) 真正构建
-                # -------------------------
                 edge_index = build_edge_index_only(
                     left_df=src_df,
                     right_df=dst_df,
