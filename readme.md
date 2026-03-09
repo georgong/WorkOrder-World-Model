@@ -94,6 +94,13 @@ data/raw/
 ```
 which should contains csv files such as W6ASSIGNMENTS-0.csv, W6TASKS-0.csv, W6ENGINEERS-0.csv, etc.
 
+### Training-data EDA report
+
+```bash
+bash scripts/generate_eda_report.sh
+```
+**Expected output:** `data/analysis/eda_report.txt` — text summary of feature scales, graph statistics, and missing/outlier checks computed by `src.runner.eda`.
+
 
 ---
 
@@ -124,8 +131,7 @@ bash scripts/visualize_graph.sh
 
 ### Training
 ```
-bash scripts/prune_graph.sh
-bash scripts/train_gnn.sh
+bash scripts/train_kfold.sh
 ```
 **Expected output:** `data/graph/sdge_pruned.pt` — pruned graph with low-degree nodes removed; `runs/checkpoints/` — saved model checkpoints; training metrics (loss, MAE) logged to W&B.
 
@@ -148,6 +154,27 @@ Output: `runs/pca_weights/pca_*_by_*.png` and `pca_summary.json`.
 python -m src.runner.pca_weights --pt path/to/graph.pt --ckpt path/to/checkpoint.pt --plotly [--open]
 ```
 Generates `runs/pca_weights/pca_interactive.html`. Use the dropdown to switch layer × group (engineers, task_types, districts, etc.). `--open` opens it in your default browser.
+
+### t-SNE visualization of hidden representations
+After training, compute t-SNE embeddings for target-node hidden states and launch an interactive viewer:
+```bash
+bash scripts/visualize_tsne.sh
+```
+This runs `src.runner.tsne_weights` to generate `runs/tsne_weights/tsne_nodes.json` and then serves an interactive Plotly UI from `src.runner.render_tsne`.
+
+### Model comparison & prediction analysis
+To compare GraphSAGE / MLP / LightGBM performance and analyze hard cases:
+```bash
+bash scripts/analysis_model.sh
+```
+**Expected output:** `runs/compare_model/compare_three.png`, `runs/compare_model/predictions.json`, and figures under `runs/analysis_model/` (prediction vs truth, hard-case analysis, metrics bar plot).
+
+### K-fold training (experiments)
+```bash
+bash scripts/train_kfold.sh
+```
+Runs `src.runner.train_kfold` with the default RGNN configuration; edit the script to change model type, fold count, or seeds.
+
 ## Model Application
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
