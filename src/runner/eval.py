@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import csv
 from pathlib import Path
-from typing import Dict, Tuple, List
+from typing import Any, Dict, List, Optional, Tuple
 from tqdm import tqdm
 import torch
 import torch.nn as nn
@@ -13,7 +14,8 @@ import torch.nn.functional as F
 
 from torch_geometric.data import HeteroData
 from torch_geometric.loader import NeighborLoader
-from torch_geometric.nn import HeteroConv, SAGEConv, Linear
+
+from src.runner.train_kfold import build_model
 
 
 # -------------------------
@@ -147,37 +149,21 @@ def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
     return in_dims
 
 
-# -------------------------
-# model (same as training)
-# -------------------------
-class HeteroSAGERegressor(nn.Module):
-    def __init__(self, metadata, in_dims, hidden_dim=128, num_layers=2, target_node_type="assignments"):
-        super().__init__()
-        self.node_types, self.edge_types = metadata
-        self.target_node_type = target_node_type
+def _ckpt_args_to_namespace(ckpt_args: dict) -> argparse.Namespace:
+    """Build an argparse.Namespace from checkpoint args so build_model() works (sage/hgt/rgcn)."""
+    ns = argparse.Namespace()
+    for k, v in ckpt_args.items():
+        setattr(ns, k, v)
+    if not hasattr(ns, "model"):
+        setattr(ns, "model", "sage")
+    if not hasattr(ns, "dropout"):
+        setattr(ns, "dropout", 0.1)
+    if not hasattr(ns, "heads"):
+        setattr(ns, "heads", 4)
+    if not hasattr(ns, "hgt_group"):
+        setattr(ns, "hgt_group", "sum")
+    return ns
 
-        self.in_proj = nn.ModuleDict({nt: Linear(in_dims[nt], hidden_dim) for nt in self.node_types})
-
-        self.convs = nn.ModuleList()
-        self.norms = nn.ModuleList()
-        for _ in range(num_layers):
-            conv_dict = {et: SAGEConv((-1, -1), hidden_dim) for et in self.edge_types}
-            self.convs.append(HeteroConv(conv_dict, aggr="mean"))
-            self.norms.append(nn.ModuleDict({nt: nn.LayerNorm(hidden_dim) for nt in self.node_types}))
-
-        self.base = nn.Parameter(torch.tensor(0.0))
-        self.out = Linear(hidden_dim, 1)
-
-    def forward(self, data: HeteroData):
-        x_dict = {nt: F.relu(self.in_proj[nt](data[nt].x)) for nt in self.node_types}
-
-        for i, conv in enumerate(self.convs):
-            x_dict = conv(x_dict, data.edge_index_dict)
-            x_dict = {k: F.relu(self.norms[i][k](v)) for k, v in x_dict.items()}
-
-        delta = self.out(x_dict[self.target_node_type]).squeeze(-1)
-        pred = self.base + delta
-        return {"pred": pred}
 
 @torch.no_grad()
 def eval_constant_baseline_on_loader(
@@ -332,10 +318,88 @@ def sort_ckpts(paths: List[Path]) -> List[Path]:
 
 
 def load_payload(ckpt_path: Path) -> dict:
-    payload = torch.load(ckpt_path, map_location="cpu")
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "model_state" not in payload or "args" not in payload:
         raise ValueError(f"Bad checkpoint format: {ckpt_path}")
     return payload
+
+
+def _get_assignment_to_task_mapping(data: HeteroData, target: str = "assignments") -> Optional[torch.Tensor]:
+    """Build target_node_index -> task_node_index from (target, *, tasks) edge. Returns None if no such edge."""
+    task_type = "tasks"
+    if task_type not in data.node_types:
+        return None
+    for (src, rel, dst) in data.edge_types:
+        if src == target and dst == task_type:
+            ei = data[(src, rel, dst)].edge_index
+            N_target = data[target].num_nodes
+            assign_to_task = torch.full((N_target,), -1, dtype=torch.long)
+            assign_to_task[ei[0]] = ei[1]
+            return assign_to_task
+    return None
+
+
+@torch.no_grad()
+def predict_all_and_save(
+    model: nn.Module,
+    data: HeteroData,
+    target: str,
+    kept: torch.Tensor,
+    *,
+    layers: int,
+    num_neighbors_per_layer: int,
+    batch_size: int,
+    device: torch.device,
+    assignment_node_ids: List[Any],
+    task_node_ids: List[Any],
+    assign_to_task: Optional[torch.Tensor],
+    out_path: Path,
+    include_ground_truth: bool = True,
+) -> None:
+    """Run model on all target nodes in `kept`, write CSV: task_id, assignment_id, predicted_completion_time [, y]."""
+    loader = make_loader(
+        data, target, kept,
+        layers=layers,
+        num_neighbors_per_layer=num_neighbors_per_layer,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    preds: Dict[int, float] = {}
+    labels: Dict[int, float] = {}
+    has_y = hasattr(data[target], "y") and data[target].y is not None
+    for batch in tqdm(loader, desc="predict_all"):
+        batch = batch.to(device)
+        pred = model(batch)["pred"]
+        bs = int(batch[target].batch_size)
+        p = pred[:bs].cpu()
+        n_id = batch[target].n_id[:bs]
+        for i in range(bs):
+            global_idx = int(n_id[i].item())
+            preds[global_idx] = float(p[i].item())
+        if include_ground_truth and has_y and hasattr(batch[target], "y"):
+            y = batch[target].y[:bs].cpu()
+            for i in range(bs):
+                global_idx = int(n_id[i].item())
+                labels[global_idx] = float(y[i].item())
+    rows: List[Dict[str, Any]] = []
+    for global_idx in sorted(preds.keys()):
+        assignment_id = assignment_node_ids[global_idx] if global_idx < len(assignment_node_ids) else global_idx
+        task_id = None
+        if assign_to_task is not None and task_node_ids and 0 <= assign_to_task[global_idx].item() < len(task_node_ids):
+            task_id = task_node_ids[int(assign_to_task[global_idx].item())]
+        row = {"task_id": task_id, "assignment_id": assignment_id, "predicted_completion_time": preds[global_idx]}
+        if include_ground_truth and global_idx in labels:
+            row["ground_truth_completion_time"] = labels[global_idx]
+        rows.append(row)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["task_id", "assignment_id", "predicted_completion_time"]
+    if include_ground_truth and has_y:
+        fieldnames.append("ground_truth_completion_time")
+    with open(out_path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    print(f"[predict_all] wrote {len(rows)} rows -> {out_path}")
 
 
 # -------------------------
@@ -344,13 +408,15 @@ def load_payload(ckpt_path: Path) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pt", type=str, required=True, help="Path to graph .pt (HeteroData)")
-    ap.add_argument("--ckpt_dir", type=str, required=True, help="Directory containing checkpoint .pt files")
+    ap.add_argument("--ckpt", type=str, default=None, help="Path to a single checkpoint .pt (overrides --ckpt_dir)")
+    ap.add_argument("--ckpt_dir", type=str, default=None, help="Directory containing checkpoint .pt files (used if --ckpt not set)")
     ap.add_argument("--device", type=str, default="auto")
-    ap.add_argument("--splits", type=str, default="val,test", help='Comma list: "train,val,test,all"')
-    ap.add_argument("--eval_batch_size", type=int, default=256)
+    ap.add_argument("--splits", type=str, default="val,test", help='Comma list: "train,val,test"')
+    ap.add_argument("--eval_batch_size", type=int, default=512)
     ap.add_argument("--num_neighbors", type=int, default=3, help="Neighbors per layer for eval")
     ap.add_argument("--out_dir", type=str, default="runs/eval_results")
-    ap.add_argument("--out_name", type=str, default='results.json', help="Path to write results (overrides out_dir)")
+    ap.add_argument("--predict_all", action="store_true", help="Iterate all target nodes and write predictions CSV")
+    ap.add_argument("--predictions_out", type=str, default=None, help="Output path for predictions CSV (default: out_dir/predictions_all.csv)")
     args = ap.parse_args()
 
     device = pick_device(args.device)
@@ -359,11 +425,18 @@ def main():
     pt_path = Path(args.pt)
     assert pt_path.exists(), f"Graph file not found: {pt_path}"
 
-    ckpt_dir = Path(args.ckpt_dir)
-    assert ckpt_dir.exists(), f"ckpt_dir not found: {ckpt_dir}"
-    ckpts = sort_ckpts(list(ckpt_dir.glob("*.pt")))
-    if not ckpts:
-        raise SystemExit(f"No .pt checkpoints found in {ckpt_dir}")
+    if args.ckpt:
+        ckpt_path = Path(args.ckpt)
+        if not ckpt_path.exists():
+            raise SystemExit(f"Checkpoint not found: {ckpt_path}")
+        ckpts = [ckpt_path]
+    else:
+        ckpt_dir = Path(args.ckpt_dir or "runs/ckpts")
+        if not ckpt_dir.exists():
+            raise SystemExit(f"ckpt_dir not found: {ckpt_dir}")
+        ckpts = sort_ckpts(list(ckpt_dir.glob("*.pt")))
+        if not ckpts:
+            raise SystemExit(f"No .pt checkpoints found in {ckpt_dir}")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -393,10 +466,16 @@ def main():
             data = base_data.clone()
 
             assert target in data.node_types, f"target {target} not in data.node_types"
-            assert hasattr(data[target], "y"), f"data[{target}].y missing"
-
-            # match training: y float
-            data[target].y = data[target].y.float()
+            has_y = hasattr(data[target], "y") and data[target].y is not None
+            if not has_y:
+                if args.predict_all:
+                    want_splits_this_ckpt = []  # skip split eval, only export predictions
+                else:
+                    raise SystemExit(f"data[{target}].y missing; required for split eval. Use --predict_all to only export predictions.")
+            else:
+                want_splits_this_ckpt = want_splits
+            if has_y:
+                data[target].y = data[target].y.float()
 
             # match training: degree filter + split
             deg_mode = ckpt_args.get("degree_mode", "in")
@@ -415,8 +494,13 @@ def main():
                 kept, seed=seed, train_ratio=train_ratio, val_ratio=val_ratio
             )
 
-            # "all" split uses all kept indices (degree-filtered)
-            all_idx = kept
+            # Save node IDs and assignment->task mapping before sanitize (for --predict_all)
+            assignment_node_ids: List[Any] = list(data[target].node_ids) if hasattr(data[target], "node_ids") else list(range(data[target].num_nodes))
+            task_node_ids: List[Any] = []
+            assign_to_task: Optional[torch.Tensor] = None
+            if "tasks" in data.node_types and hasattr(data["tasks"], "node_ids"):
+                task_node_ids = list(data["tasks"].node_ids)
+                assign_to_task = _get_assignment_to_task_mapping(data, target)
 
             # match training: normalize features
             normalize_node_features_inplace(data, drop_const=True)
@@ -427,15 +511,18 @@ def main():
             # match training: sanitize
             data = sanitize_for_neighbor_loader(data)
 
-            # rebuild model + load weights
-            model = HeteroSAGERegressor(
-                metadata=data.metadata(),
-                in_dims=in_dims,
-                hidden_dim=hidden,
-                num_layers=layers,
-                target_node_type=target,
-            ).to(device)
-            model.load_state_dict(payload["model_state"], strict=False)
+            # rebuild model (sage / hgt / rgcn from checkpoint) + load weights
+            ckpt_ns = _ckpt_args_to_namespace(ckpt_args)
+            model = build_model(ckpt_ns, data, in_dims, target).to(device)
+            try:
+                model.load_state_dict(payload["model_state"], strict=True)
+            except RuntimeError as e:
+                if "state_dict" in str(e) or "size mismatch" in str(e) or "Unexpected key" in str(e):
+                    raise SystemExit(
+                        "Checkpoint was trained on a different graph (different node types or feature sizes). "
+                        "Use the same graph .pt file that was used when training this checkpoint (e.g. the same --data_path in train_kfold)."
+                    ) from e
+                raise
             model.eval()
 
             # loaders per split
@@ -455,8 +542,7 @@ def main():
             }
 
             line = f"[ckpt] {ckpt_path.name} (epoch={epoch})"
-            for split in want_splits:
-                split_idx = idx_map[split]
+            for split in want_splits_this_ckpt:
                 loader = make_loader(
                     data,
                     target,
@@ -498,6 +584,26 @@ def main():
 
             print(line)
             f_out.write(json.dumps(results) + "\n")
+
+            # Optionally iterate all target nodes and write predictions CSV (task_id, assignment_id, pred)
+            if args.predict_all:
+                pred_out = Path(args.predictions_out) if args.predictions_out else out_dir / "predictions_all.csv"
+                num_neighbors = int(ckpt_args.get("num_neighbors", args.num_neighbors))
+                predict_all_and_save(
+                    model,
+                    data,
+                    target,
+                    kept,
+                    layers=layers,
+                    num_neighbors_per_layer=num_neighbors,
+                    batch_size=args.eval_batch_size,
+                    device=device,
+                    assignment_node_ids=assignment_node_ids,
+                    task_node_ids=task_node_ids,
+                    assign_to_task=assign_to_task,
+                    out_path=pred_out,
+                    include_ground_truth=has_y,
+                )
 
             if device.type == "mps":
                 torch.mps.empty_cache()

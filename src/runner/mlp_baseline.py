@@ -1,10 +1,13 @@
-# src/runner/mlp_baseline_subgraph.py
+# src/runner/mlp_baseline.py
+# MLP baseline aligned with train_kfold: same data_path, full_idx from finite y, normalization, k-fold, W&B keys.
+
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -14,6 +17,66 @@ from torch_geometric.loader import NeighborLoader
 from tqdm import tqdm
 
 import wandb
+
+
+# -------------------------
+# seeds (align train_kfold)
+# -------------------------
+def _parse_int_range_token(tok: str) -> List[int]:
+    tok = tok.strip()
+    if not tok:
+        return []
+    if "-" in tok:
+        a, b = tok.split("-", 1)
+        a, b = int(a.strip()), int(b.strip())
+        if b < a:
+            a, b = b, a
+        return list(range(a, b + 1))
+    return [int(tok)]
+
+
+def parse_seeds_arg(seeds: Optional[str], seeds_file: Optional[str]) -> Optional[torch.Tensor]:
+    items: List[int] = []
+    if seeds_file:
+        p = Path(seeds_file)
+        if not p.exists():
+            raise FileNotFoundError(f"--seeds_file not found: {p}")
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for tok in line.split(","):
+                items.extend(_parse_int_range_token(tok))
+    if seeds:
+        for tok in seeds.split(","):
+            items.extend(_parse_int_range_token(tok))
+    if not items:
+        return None
+    return torch.tensor(sorted(set(items)), dtype=torch.long)
+
+
+def make_kfold_splits(idx: torch.Tensor, *, k: int, seed: int) -> List[torch.Tensor]:
+    assert idx.ndim == 1 and k >= 2
+    N = idx.numel()
+    if N < k:
+        raise ValueError(f"Not enough samples for k-fold: N={N}, k={k}")
+    g = torch.Generator().manual_seed(seed)
+    perm = idx[torch.randperm(N, generator=g)]
+    fold_sizes = [N // k] * k
+    for i in range(N % k):
+        fold_sizes[i] += 1
+    folds: List[torch.Tensor] = []
+    offset = 0
+    for fs in fold_sizes:
+        folds.append(perm[offset : offset + fs])
+        offset += fs
+    return folds
+
+
+def complement(all_idx: torch.Tensor, holdout: torch.Tensor) -> torch.Tensor:
+    hold_set = set(holdout.tolist())
+    keep = [int(x) for x in all_idx.tolist() if int(x) not in hold_set]
+    return torch.tensor(keep, dtype=torch.long)
 
 
 # -------------------------
@@ -63,7 +126,6 @@ def ensure_all_node_types_have_x(data: HeteroData) -> Dict[str, int]:
 
 
 def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
-    # NeighborLoader hates non-tensors in storages
     for nt in data.node_types:
         store = data[nt]
         for key in list(store.keys()):
@@ -77,6 +139,45 @@ def sanitize_for_neighbor_loader(data: HeteroData) -> HeteroData:
                 continue
             del store[key]
     return data
+
+
+# -------------------------
+# normalization (align train_kfold)
+# -------------------------
+@torch.no_grad()
+def normalize_node_features_inplace(
+    data: HeteroData,
+    *,
+    eps: float = 1e-6,
+    drop_const: bool = True,
+    const_std_thr: float = 1e-8,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    stats: Dict[str, Dict[str, torch.Tensor]] = {}
+    for nt in data.node_types:
+        if not hasattr(data[nt], "x"):
+            continue
+        x = data[nt].x
+        if not isinstance(x, torch.Tensor) or x.dim() != 2:
+            continue
+        if not x.is_floating_point():
+            x = x.float()
+        x = x.cpu()
+        mean = x.mean(dim=0)
+        var = x.var(dim=0, unbiased=False)
+        std = torch.sqrt(var + eps)
+        keep = torch.ones_like(std, dtype=torch.bool)
+        if drop_const:
+            keep = std > const_std_thr
+            if keep.sum().item() == 0:
+                keep[0] = True
+        x2 = (x[:, keep] - mean[keep]) / std[keep]
+        data[nt].x = x2
+        stats[nt] = {"mean": mean[keep], "std": std[keep], "keep_mask": keep}
+        if hasattr(data[nt], "attr_name"):
+            an = data[nt].attr_name
+            if isinstance(an, list) and len(an) == int(keep.numel()):
+                data[nt].attr_name = [an[i] for i in range(len(an)) if bool(keep[i].item())]
+    return stats
 
 
 @torch.no_grad()
@@ -204,9 +305,11 @@ class MLPRegressor(nn.Module):
         for _ in range(depth):
             layers.append(nn.Linear(d, hidden))
             layers.append(nn.ReLU())
+            layers.append(nn.Linear(hidden, hidden))
+            layers.append(nn.ReLU())
             layers.append(nn.Dropout(dropout))
-            d = hidden
-        layers.append(nn.Linear(d, 1))
+            d = hidden 
+        layers.append(nn.Linear(hidden, 1))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -276,26 +379,222 @@ def baseline_smoothl1_on_loader(
 
 
 # -------------------------
+# one-fold training (align train_kfold.run_one_fold)
+# -------------------------
+def run_one_fold_mlp(
+    *,
+    base_data: HeteroData,
+    target: str,
+    train_idx: torch.Tensor,
+    val_idx: torch.Tensor,
+    args: argparse.Namespace,
+    device: torch.device,
+    fold: int,
+    group_name: str,
+    neighbor_types: List[str],
+    use_wandb: bool = True,
+    out_dir: Optional[Path] = None,
+    seed: Optional[int] = None,
+) -> Dict[str, Any]:
+    data = base_data.clone()
+    data[target].y = data[target].y.float()
+
+    normalize_node_features_inplace(data, drop_const=True)
+    in_dims = ensure_all_node_types_have_x(data)
+    data = sanitize_for_neighbor_loader(data)
+
+    num_neighbors = {et: [args.num_neighbors] * args.layers for et in data.edge_types}
+    train_loader = NeighborLoader(
+        data,
+        input_nodes=(target, train_idx),
+        num_neighbors=num_neighbors,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        persistent_workers=(args.num_workers > 0),
+    )
+    val_loader = NeighborLoader(
+        data,
+        input_nodes=(target, val_idx),
+        num_neighbors=num_neighbors,
+        batch_size=args.eval_batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        persistent_workers=(args.num_workers > 0),
+    )
+
+    probe_n = min(1000, int(train_idx.numel()))
+    probe_bs = min(1024, int(args.batch_size))
+    first = next(iter(NeighborLoader(
+        data, input_nodes=(target, train_idx[:probe_n]),
+        num_neighbors=num_neighbors, batch_size=probe_bs, shuffle=False,
+    ))).to(device)
+    X0, _ = batch_to_tabular_per_seed(first, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
+    d_in = int(X0.size(1))
+
+    model = MLPRegressor(
+        d_in=d_in,
+        hidden=args.mlp_hidden,
+        depth=args.mlp_depth,
+        dropout=args.dropout,
+    ).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
+    def loss_fn(pred: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        if args.loss == "smoothl1":
+            return F.smooth_l1_loss(pred, y, beta=args.beta)
+        if args.loss == "mse":
+            return F.mse_loss(pred, y)
+        return F.l1_loss(pred, y)
+
+    c_med = data[target].y[train_idx].median().item()
+    baseline_val = baseline_smoothl1_on_loader(val_loader, target=target, device=device, c=c_med, beta=args.beta)
+
+    if use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            name=f"{args.wandb_run_name or 'kfold'}-mlp-fold{fold:02d}",
+            group=group_name,
+            config={
+                **vars(args),
+                "fold": fold,
+                "fold_train_n": int(train_idx.numel()),
+                "fold_val_n": int(val_idx.numel()),
+                "d_in": d_in,
+                "model_type": "mlp",
+            },
+            reinit=True,
+        )
+        wandb.log({"baseline/median_c": c_med, "baseline/val_smoothl1": baseline_val}, step=0)
+
+    global_step = 0
+    best_val_sl1 = float("inf")
+    best_val_rmse = float("inf")
+    best_epoch = -1
+    best_state: Optional[Dict[str, torch.Tensor]] = None
+
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        total_loss = 0.0
+        total_seeds = 0
+        pbar = tqdm(train_loader, desc=f"Fold {fold:02d} Epoch {epoch:03d} [mlp/train]")
+        for batch in pbar:
+            batch = batch.to(device)
+            X, y = batch_to_tabular_per_seed(batch, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
+            pred = model(X)
+            loss = loss_fn(pred, y)
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            opt.step()
+            bs = int(y.numel())
+            total_loss += loss.item() * bs
+            total_seeds += bs
+            global_step += 1
+            pbar.set_postfix(loss=f"{total_loss / max(total_seeds, 1):.5f}")
+
+            if args.max_steps > 0 and global_step >= args.max_steps:
+                break
+
+            if use_wandb and args.wandb_log_every > 0 and (global_step % args.wandb_log_every == 0):
+                wandb.log(
+                    {
+                        "train/step_smoothl1": float(loss.item()),
+                        "train/step_avg_smoothl1": total_loss / max(total_seeds, 1),
+                        "train/global_step": global_step,
+                        "train/epoch": epoch,
+                    },
+                    step=global_step,
+                )
+
+        train_loss = total_loss / max(total_seeds, 1)
+        val_metrics = eval_loader_smoothl1_mae_rmse(
+            model, val_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device, beta=args.beta
+        )
+
+        if use_wandb:
+            wandb.log(
+                {
+                    "train/epoch_smoothl1": train_loss,
+                    "val/mse": val_metrics["mse"],
+                    "val/mae": val_metrics["mae"],
+                    "val/rmse": val_metrics["rmse"],
+                    "val/smoothl1": val_metrics["smoothl1"],
+                    "train/global_step": global_step,
+                    "epoch": epoch,
+                },
+                step=epoch,
+            )
+
+        val_sl1 = float(val_metrics["smoothl1"])
+        val_rmse = float(val_metrics["rmse"])
+        print(f"[fold {fold:02d}][mlp][epoch {epoch:03d}] train_smoothl1={train_loss:.6f}  val_smoothl1={val_sl1:.6f}  val_rmse={val_rmse:.6f}")
+
+        if val_sl1 < best_val_sl1:
+            best_val_sl1 = val_sl1
+            best_val_rmse = min(best_val_rmse, val_rmse)
+            best_epoch = epoch
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+        if device.type == "mps":
+            torch.mps.empty_cache()
+
+        if args.max_steps > 0 and global_step >= args.max_steps:
+            break
+
+    if use_wandb:
+        wandb.log(
+            {
+                "summary/best_epoch": best_epoch,
+                "summary/best_val_smoothl1": best_val_sl1,
+                "summary/best_val_rmse": best_val_rmse,
+                "summary/baseline_val_smoothl1": baseline_val,
+            },
+            step=epoch,
+        )
+        wandb.finish()
+
+    summary = {
+        "fold": fold,
+        "model": "mlp",
+        "best_epoch": best_epoch,
+        "best_val_smoothl1": best_val_sl1,
+        "best_val_rmse": best_val_rmse,
+        "baseline_val_smoothl1": baseline_val,
+    }
+    if out_dir is not None and seed is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        prefix = f"seed{seed}_fold{fold:02d}"
+        (out_dir / f"{prefix}.json").write_text(json.dumps(summary, indent=2))
+        if best_state is not None:
+            torch.save(best_state, out_dir / f"{prefix}.pt")
+    return summary
+
+
+# -------------------------
 # main
 # -------------------------
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pt", type=str, required=True)
+    ap = argparse.ArgumentParser(description="MLP baseline aligned with train_kfold (k-fold, normalization, W&B).")
+    # data (align train_kfold)
+    ap.add_argument("--data_path", type=str, default=None, help="Path to HeteroData .pt (same as train_kfold)")
+    ap.add_argument("--pt", type=str, default=None, help="Alias for --data_path")
     ap.add_argument("--target", type=str, default="assignments")
+    ap.add_argument("--label_key", type=str, default="y")
 
-    ap.add_argument("--device", type=str, default="auto")
+    # k-fold
+    ap.add_argument("--k", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seeds", type=str, default=None)
+    ap.add_argument("--seeds_file", type=str, default=None)
+
+    # loader (align train_kfold defaults)
+    ap.add_argument("--batch_size", type=int, default=2048)
+    ap.add_argument("--eval_batch_size", type=int, default=2048)
+    ap.add_argument("--num_neighbors", type=int, default=5)
     ap.add_argument("--layers", type=int, default=2)
-    ap.add_argument("--num_neighbors", type=int, default=3)
-
-    # sane defaults
-    ap.add_argument("--batch_size", type=int, default=4096)
-    ap.add_argument("--eval_batch_size", type=int, default=8192)
-
-    ap.add_argument("--min_degree", type=int, default=1)
-    ap.add_argument("--degree_mode", type=str, default="in")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--train_ratio", type=float, default=0.8)
-    ap.add_argument("--val_ratio", type=float, default=0.1)
+    ap.add_argument("--num_workers", type=int, default=0)
 
     # MLP hyperparams
     ap.add_argument("--mlp_hidden", type=int, default=256)
@@ -303,213 +602,118 @@ def main():
     ap.add_argument("--dropout", type=float, default=0.1)
 
     # optim
-    ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--max_steps", type=int, default=2800, help="Stop after this many steps (0 = no limit)")
+    ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--weight_decay", type=float, default=1e-4)
     ap.add_argument("--loss", type=str, default="smoothl1", choices=["smoothl1", "mse", "l1"])
     ap.add_argument("--beta", type=float, default=1.0)
-    ap.add_argument("--grad_clip", type=float, default=5.0)
+    ap.add_argument("--grad_clip", type=float, default=0.0)
 
-    # logging
-    ap.add_argument("--log_every", type=int, default=20)
-    ap.add_argument("--wandb_project", type=str, default="scheduling_world_model")
+    # wandb (align train_kfold)
+    ap.add_argument("--wandb_project", type=str, default="kfold")
     ap.add_argument("--wandb_run_name", type=str, default=None)
+    ap.add_argument("--wandb_log_every", type=int, default=10, help="Log train step every N steps (0=off)")
     ap.add_argument("--no_wandb", action="store_true")
 
+    ap.add_argument("--device", type=str, default="auto")
+
     args = ap.parse_args()
+
+    pt = args.data_path or args.pt
+    if not pt:
+        raise SystemExit("Provide --data_path or --pt")
+    data_path = Path(pt)
+    if not data_path.exists():
+        raise FileNotFoundError(f"data not found: {data_path}")
+
     device = pick_device(args.device)
-    print(f"[info] device={device}")
+    print(f"[info] device={device} | model=mlp")
 
-    torch.manual_seed(int(args.seed))
+    data: HeteroData = torch.load(data_path, map_location="cpu", weights_only=False)
+    if not isinstance(data, HeteroData):
+        raise TypeError("Loaded object is not HeteroData")
 
-    data: HeteroData = torch.load(Path(args.pt), map_location="cpu", weights_only=False)
     target = args.target
-    data[target].y = data[target].y.float()
+    if target not in data.node_types:
+        raise ValueError(f"target {target!r} not in node_types")
 
-    neighbor_types = ["engineers", "tasks", "task_types", "districts"]
+    if args.label_key != "y":
+        if not hasattr(data[target], args.label_key):
+            raise ValueError(f"target has no attr {args.label_key!r}")
+        data[target].y = getattr(data[target], args.label_key)
 
-    in_dims = ensure_all_node_types_have_x(data)
-    data = sanitize_for_neighbor_loader(data)
+    y = data[target].y
+    if not isinstance(y, torch.Tensor):
+        raise TypeError(f"{target}.y is not a Tensor")
+    y = y.view(-1).float()
+    data[target].y = y
 
-    # split by degree
-    deg = compute_target_degree(data, target, degree_mode=args.degree_mode)
-    kept = (deg >= args.min_degree).nonzero(as_tuple=False).view(-1)
-    train_idx, val_idx, test_idx = split_indices(kept, int(args.seed), float(args.train_ratio), float(args.val_ratio))
-    print(f"[split] train={train_idx.numel()} val={val_idx.numel()} test={test_idx.numel()}")
+    finite = torch.isfinite(y)
+    if finite.all():
+        full_idx = torch.arange(y.numel(), dtype=torch.long)
+    else:
+        full_idx = torch.nonzero(finite, as_tuple=False).view(-1).long()
+        print(f"[warn] non-finite y; using subset: {full_idx.numel()}/{y.numel()}")
 
-    num_neighbors = {et: [int(args.num_neighbors)] * int(args.layers) for et in data.edge_types}
+    neighbor_types = ["engineers", "tasks", "task_types", "districts", "departments"]
 
-    def make_loader(idx, bs, shuffle):
-        return NeighborLoader(
-            data,
-            input_nodes=(target, idx),
-            num_neighbors=num_neighbors,
-            batch_size=int(bs),
-            shuffle=bool(shuffle),
-        )
+    seed_list = parse_seeds_arg(args.seeds, args.seeds_file)
+    if seed_list is None:
+        seed_list = torch.tensor([args.seed], dtype=torch.long)
 
-    train_loader = make_loader(train_idx, args.batch_size, True)
-    val_loader = make_loader(val_idx, args.eval_batch_size, False)
-    test_loader = make_loader(test_idx, args.eval_batch_size, False)
+    out_dir = Path("checkpoints") / "piecewise"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # infer feature dim
-    probe_n = min(1000, int(train_idx.numel()))
-    probe_bs = min(1024, int(args.batch_size))
-    first = next(iter(make_loader(train_idx[:probe_n], probe_bs, False))).to(device)
-    X0, _ = batch_to_tabular_per_seed(first, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
-    d_in = int(X0.size(1))
-    print(f"[feat] d_in={d_in} (target_x={int(first[target].x.size(1))}, neighbor_types={neighbor_types})")
-
-    model = MLPRegressor(
-        d_in=d_in,
-        hidden=int(args.mlp_hidden),
-        depth=int(args.mlp_depth),
-        dropout=float(args.dropout),
-    ).to(device)
-
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
-
-    def loss_fn(pred, y):
-        if args.loss == "smoothl1":
-            return F.smooth_l1_loss(pred, y, beta=float(args.beta))
-        if args.loss == "mse":
-            return F.mse_loss(pred, y)
-        return F.l1_loss(pred, y)
-
-    # baseline (match your GNN logic: train median as constant)
-    c_med = float(data[target].y[train_idx].median().item())
-    baseline_val_sl1 = baseline_smoothl1_on_loader(val_loader, target=target, device=device, c=c_med, beta=float(args.beta))
-    print(f"[baseline] c_med={c_med:.6f} val_smoothl1={baseline_val_sl1:.6f}")
-
-    run = None
-    if not args.no_wandb:
-        run = wandb.init(
-            project=args.wandb_project,
-            name=args.wandb_run_name,
-            config={
-                **vars(args),
-                "d_in": d_in,
-                "neighbor_types": neighbor_types,
-                "train_n": int(train_idx.numel()),
-                "val_n": int(val_idx.numel()),
-                "test_n": int(test_idx.numel()),
-                "baseline_c_med": c_med,
-                "baseline_val_smoothl1": baseline_val_sl1,
-            },
-        )
-        wandb.log({"baseline/median_c": c_med, "baseline/val_smoothl1": baseline_val_sl1}, step=0)
-
-    global_step = 0
-    t_start = time.time()
-
-    for ep in range(1, int(args.epochs) + 1):
-        model.train()
-        ep_t0 = time.time()
-
-        batch_losses: List[float] = []
-        loss_sum_by_samples = 0.0
-        n_samples = 0
-
-        pbar = tqdm(train_loader, desc=f"train ep{ep}", leave=True)
-        for bi, batch in enumerate(pbar):
-            step_t0 = time.time()
-
-            batch = batch.to(device)
-            X, y = batch_to_tabular_per_seed(batch, target=target, neighbor_types=neighbor_types, in_dims=in_dims)
-            pred = model(X)
-            loss = loss_fn(pred, y)
-
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), float(args.grad_clip))
-            opt.step()
-
-            loss_val = float(loss.detach().cpu().item())
-            bs = int(y.numel())
-            batch_losses.append(loss_val)
-            loss_sum_by_samples += loss_val * bs
-            n_samples += bs
-
-            avg_mean_loss_so_far = sum(batch_losses) / max(len(batch_losses), 1)
-            avg_loss_by_samples_so_far = loss_sum_by_samples / max(n_samples, 1)
-
-            p_stats = batch_stats_1d(pred)
-            y_stats = batch_stats_1d(y)
-            var_ratio = p_stats["var"] / (y_stats["var"] + 1e-12)
-
-            step_dt = time.time() - step_t0
-            pbar.set_postfix(
-                loss=loss_val,
-                avg_mean_loss=avg_mean_loss_so_far,
-                avg_loss_by_samples=avg_loss_by_samples_so_far,
-                step_s=step_dt,
-            )
-
-            if run is not None and (global_step % int(args.log_every) == 0):
-                wandb.log(
-                    {
-                        "train/batch_loss": loss_val,
-                        "train/avg_mean_loss_running": avg_mean_loss_so_far,
-                        "train/avg_loss_by_samples_running": avg_loss_by_samples_so_far,
-                        "train/batch_size": bs,
-                        "train/pred_std": p_stats["std"],
-                        "train/y_mean": y_stats["mean"],
-                        "train/y_var": y_stats["var"],
-                        "train/y_std": y_stats["std"],
-                        "train/var_ratio_pred_to_y": var_ratio,
-                        "time/step_s": step_dt,
-                        "epoch": ep,
-                    },
-                    step=global_step,
+    all_summaries: List[Dict[str, Any]] = []
+    for si, seed in enumerate(seed_list.tolist()):
+        seed_int = int(seed)
+        torch.manual_seed(seed_int)
+        print(f"\n[seed {seed}] ({si + 1}/{seed_list.numel()})")
+        if args.k >= 2:
+            folds = make_kfold_splits(full_idx, k=args.k, seed=seed_int)
+            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{seed_int}"
+            for fold, val_idx in enumerate(folds):
+                train_idx = complement(full_idx, val_idx)
+                summary = run_one_fold_mlp(
+                    base_data=data,
+                    target=target,
+                    train_idx=train_idx,
+                    val_idx=val_idx,
+                    args=args,
+                    device=device,
+                    fold=fold,
+                    group_name=group_name,
+                    neighbor_types=neighbor_types,
+                    use_wandb=not args.no_wandb,
+                    out_dir=out_dir,
+                    seed=seed_int,
                 )
-
-            global_step += 1
-
-        ep_dt = time.time() - ep_t0
-        avg_mean_loss = sum(batch_losses) / max(len(batch_losses), 1)
-        avg_loss_by_samples = loss_sum_by_samples / max(n_samples, 1)
-
-        va = eval_loader_smoothl1_mae_rmse(
-            model, val_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device, beta=float(args.beta)
-        )
-        te = eval_loader_smoothl1_mae_rmse(
-            model, test_loader, target=target, neighbor_types=neighbor_types, in_dims=in_dims, device=device, beta=float(args.beta)
-        )
-
-        print(
-            f"[ep {ep}] "
-            f"train avg_mean_loss={avg_mean_loss:.4f} avg_loss_by_samples={avg_loss_by_samples:.4f} | "
-            f"val sl1={va['smoothl1']:.4f} (base {baseline_val_sl1:.4f}) rmse={va['rmse']:.4f} mae={va['mae']:.4f} mse={va['mse']:.4f} | "
-            f"test sl1={te['smoothl1']:.4f} rmse={te['rmse']:.4f} mae={te['mae']:.4f} mse={te['mse']:.4f} | "
-            f"epoch_s={ep_dt:.1f}"
-        )
-
-        if run is not None:
-            wandb.log(
-                {
-                    "train/avg_mean_loss": avg_mean_loss,
-                    "train/avg_loss_by_samples": avg_loss_by_samples,
-                    "val/mse": va["mse"],
-                    "val/mae": va["mae"],
-                    "val/rmse": va["rmse"],
-                    "val/smoothl1": va["smoothl1"],
-                    "val/improve_over_baseline_sl1": baseline_val_sl1 - va["smoothl1"],
-                    "test/mse": te["mse"],
-                    "test/mae": te["mae"],
-                    "test/rmse": te["rmse"],
-                    "test/smoothl1": te["smoothl1"],
-                    "time/epoch_s": ep_dt,
-                    "time/elapsed_s": time.time() - t_start,
-                    "epoch": ep,
-                },
-                step=global_step,
+                summary["seed"] = seed_int
+                all_summaries.append(summary)
+        else:
+            train_idx, val_idx, _ = split_indices(full_idx, seed_int, 0.8, 0.1)
+            group_name = f"{args.wandb_run_name or 'kfold'}-mlp-seed{seed_int}"
+            summary = run_one_fold_mlp(
+                base_data=data,
+                target=target,
+                train_idx=train_idx,
+                val_idx=val_idx,
+                args=args,
+                device=device,
+                fold=0,
+                group_name=group_name,
+                neighbor_types=neighbor_types,
+                use_wandb=not args.no_wandb,
+                out_dir=out_dir,
+                seed=seed_int,
             )
+            summary["seed"] = seed_int
+            all_summaries.append(summary)
 
-        if device.type == "mps":
-            torch.mps.empty_cache()
-
-    if run is not None:
-        wandb.finish()
+    out_path = out_dir / "kfold_summary.json"
+    out_path.write_text(json.dumps(all_summaries, indent=2))
+    print(f"\n[ok] wrote summary -> {out_path}")
 
 
 if __name__ == "__main__":
