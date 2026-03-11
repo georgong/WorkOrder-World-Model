@@ -172,3 +172,109 @@ bash scripts/analysis_model.sh
 ## Model Application
 
 See the README for setup and files: [WOW-dashboard/README.md](./WOW-dashboard/README.md)
+
+--- 
+## Project Structure
+
+```
+WorkOrder-World-Model/
+├── configs/
+│   ├── data.yaml                        # Dataset variable schema (dtype, mask, outlier policy)
+│   └── graph.yaml                       # Graph construction config (nodes, edges, features)
+│
+├── data/
+│   ├── raw/                             # Raw CSVs exported from SDG&E CLICK system
+│   │   ├── ...
+│   ├── processed/                       # Cleaned & merged parquet tables
+│   │   ├── ...
+│   ├── features_table/                  # Per-entity feature tables
+│   │   ├── ...
+│   ├── graph/                           # Serialized PyG HeteroData graphs
+│   │   ├── sdge.pt                      # Full constructed graph
+│   │   ├── sdge_pruned.pt               # Pruned graph (low-degree nodes removed)
+│   │   └── hetero_sdge.pt               # Alternate graph variant
+│   └── analysis/                        # EDA & connectivity outputs
+│       ├── ...
+│
+├── src/
+│   ├── process/                         # Graph & data pipeline
+│   │   ├── structure_graph_builder.py   # Core HeteroData builder from CSVs
+│   │   ├── construct_graph.py           # Legacy graph construction
+│   │   ├── construct_baseline_graph.py  # Baseline graph variant
+│   │   ├── graph_builder.py             # GraphBuilder orchestration
+│   │   ├── graph_connectivity.py        # Connectivity heatmaps & metapath analysis
+│   │   ├── prune_graph.py               # Prune low-degree nodes
+│   │   ├── feature_engineering.py       # Feature extraction & transformation
+│   │   ├── feature_schema.py            # Schema parsing utilities
+│   │   └── utils/
+│   │       ├── convert_columns.py
+│   │       ├── filter_raw_data.py
+│   │       └── inspect_relation.py
+│   ├── model/
+│   │   └── gnn.py                       # GNN model definitions
+│   └── runner/                          # Experiment entrypoints
+│       ├── train.py                     # GNN training loop (W&B logging)
+│       ├── train_kfold.py               # K-fold cross-validation training
+│       ├── eval.py                      # Checkpoint evaluation
+│       ├── interpret_subgraph.py        # Feature attribution (grad×input, IG, occlusion)
+│       ├── eda.py                       # EDA report generation
+│       └── run_gnn.py                   # Inference runner
+│
+├── WOW-dashboard/                       # Web application
+│   ├── app/                             # Next.js App Router (layout, pages)
+│   ├── components/                      # React UI components
+│   │   ├── Dashboard.tsx
+│   │   ├── MetricsCards.tsx
+│   │   ├── RiskTable.tsx
+│   │   ├── Charts.tsx
+│   │   ├── GraphVisualizer.tsx
+│   │   ├── UploadPanel.tsx
+│   │   └── HeaderActions.tsx
+│   ├── lib/                             # Shared TS utilities & API client
+│   │   ├── api.ts
+│   │   ├── types.ts
+│   │   └── header-context.tsx
+│   ├── api/                             # FastAPI Python backend (Vercel serverless)
+│   │   ├── index.py                     # API endpoints: /predict, /demo, /health, /graph
+│   │   └── inference/
+│   │       ├── graph_inference_api.py   # Upload → graph → inference pipeline
+│   │       ├── structure_graph_builder.py
+│   │       ├── model.py
+│   │       ├── feature_engineering.py
+│   │       ├── feature_schema.py
+│   │       └── schema.py
+│
+├── test/                                # Pytest unit tests (134 tests)
+│   ├── test_prune_graph.py
+│   ├── test_graph_connectivity.py
+│   ├── test_train_eval_utils.py
+│   ├── test_structure_graph_builder.py
+│   ├── test_interpret_utils.py
+│   └── test_graph_construction.py
+│
+├── scripts/                             # Shell script entrypoints
+│   ├── generate_graph.sh
+│   ├── generate_eda_report.sh
+│   ├── graph_eda.sh
+│   ├── train_gnn.sh
+│   ├── train_kfold.sh
+│   ├── visualize_graph.sh
+│   ├── visualize_interpretation.sh
+│   ├── visualize_tsne.sh
+│   └── analysis_model.sh
+│
+├── docs/
+│   ├── data_schema.md                   # Field-level data dictionary
+│   ├── eda_report_analysis.md
+│   └── architecture_mermaid.md          # System architecture diagram
+│
+├── server/                              # Local graph visualization server
+│   ├── app.py
+│   └── utils.py
+├── interpret_server/                    # Local interpretation visualization server
+│   └── app.py
+│
+├── requirements.txt
+├── dockerfile
+└── readme.md
+```
